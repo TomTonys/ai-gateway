@@ -1,11 +1,12 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # ============================================================
-#  在受限容器（/etc 只读、无 crond/systemd 守护）里后台跑网关，
-#  并尽量做开机自启。用法: ./start-bg.sh [start|stop|status|restart]
+#  在受限容器（/etc 只读、无 crond/systemd 守护）里后台跑网关。
+#  用法: bash start-bg.sh [start|stop|status|restart]
 #
 #  说明:
 #   - 本脚本只管理「本容器内」的网关后台进程，关闭终端不影响运行
 #   - 若容器重启，需再次执行（或在宿主/entrypoint 里加一行调用）
+#   - 请用 bash 执行（sh ./start-bg.sh 会因 pipefail 报错）
 # ============================================================
 set -uo pipefail
 cd "$(dirname "$0")"
