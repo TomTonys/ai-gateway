@@ -33,7 +33,10 @@ router.get('/v1/models', (req, res) => {
 // ============================================================
 router.get('/api/logs', (req, res) => {
   const limit = Math.min(parseInt(req.query.limit) || 50, 500);
-  res.json({ data: LogRepo.list(limit) });
+  const offset = Math.max(0, parseInt(req.query.offset) || 0);
+  // success 过滤：'1'=仅成功 / '0'=仅失败 / 缺省=全部
+  const success = ('success' in req.query && req.query.success !== '') ? req.query.success : null;
+  res.json({ data: LogRepo.list(limit, offset, success), total: LogRepo.count(success) });
 });
 
 router.get('/api/stats', (req, res) => {
