@@ -437,4 +437,35 @@ function parseDateTime(s) {
   return Number.isNaN(t) ? 0 : t;
 }
 
-module.exports = { ProviderRepo, ModelRepo, CustomModelRepo, LogRepo };
+// ============================================================
+//  Model Connectivity Test Results
+//  按 model_id 存储最近一次连通性测试结果
+// ============================================================
+const TestResultRepo = {
+  all() {
+    return store.test_results || {};
+  },
+  get(modelId) {
+    return (store.test_results || {})[Number(modelId)] || null;
+  },
+  set(modelId, { duration_ms, ok, status, error }) {
+    if (!store.test_results) store.test_results = {};
+    store.test_results[Number(modelId)] = {
+      model_id: Number(modelId),
+      ok: ok ? 1 : 0,
+      duration_ms: duration_ms || 0,
+      status: status || 0,
+      error: error || '',
+      tested_at: now(),
+    };
+    persist();
+  },
+  remove(modelId) {
+    if (store.test_results && store.test_results[Number(modelId)]) {
+      delete store.test_results[Number(modelId)];
+      persist();
+    }
+  },
+};
+
+module.exports = { ProviderRepo, ModelRepo, CustomModelRepo, LogRepo, TestResultRepo };
