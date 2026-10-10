@@ -1,0 +1,22 @@
+[Unit]
+Description=AI Gateway (Node.js LLM gateway on port 3100)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/workspace/ai_gateway
+ExecStart=/usr/local/bin/node server.js
+Restart=always
+RestartSec=3
+Environment=NODE_ENV=production
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=aigateway
+# 优雅停机
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
