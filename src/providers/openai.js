@@ -35,12 +35,13 @@ async function callProvider(member, { body, stream }) {
 
   // 防御性清洗：部分 OpenAI 兼容服务端（如 token.sensenova.cn）对请求体校验严格，
   // 遇到空 messages、多余的 assistant/tool 轮次等会直接 400，因此发出前做一次规范化：
-  //   1. 保证 messages 非空（空则兜底一条 user 消息）
+  //   1. 仅在 messages 缺失/空数组时兜底一条 user 消息；
+  //      绝不整体替换非空 messages —— 多模态请求里 content 是数组
+  //      （[{type:'text',...},{type:'image_url',image_url:{url:'data:image/...;base64,...'}}]），
+  //      任何改写都会破坏图片附件，导致上游报 "content must be string or array"。
   //   2. 去掉 messages 之外的未知字段中值为 null 的项，避免 null 参数触发校验失败
   if (!Array.isArray(payload.messages) || payload.messages.length === 0) {
     payload.messages = [{ role: 'user', content: '' }];
-  } else {
-    payload.messages = payload.messages.filter(m => m && typeof m === 'object');
   }
   for (const k of Object.keys(payload)) {
     if (payload[k] === null) delete payload[k];
@@ -50,7 +51,7 @@ async function callProvider(member, { body, stream }) {
   if (stream) payload.stream_options = { ...(payload.stream_options || {}), include_usage: true };
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 120000); // 2 分钟超时
+  const timeout = setTimeout(() => controller.abort(), 300000); // 5 分钟超时
 
   try {
     const res = await fetch(url, {
