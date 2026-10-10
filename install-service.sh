@@ -1,17 +1,34 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # ============================================================
 #  把 AI Gateway 安装为 systemd 服务（后台自启、挂了自愈、开机启动）
-#  用法: sudo ./install-service.sh
+#  用法: bash install-service.sh   （在有 systemd 的宿主机上可加 sudo）
+#
+#  注意: 本容器 /etc 只读、无 systemd 守护，这里装不成是预期的。
+#        容器内请用 ./start-bg.sh start 代替。
 # ============================================================
-set -euo pipefail
+set -uo pipefail
 
 UNIT="aigateway.service"
 SYSTEMD_DIR="/etc/systemd/system"
 
 if [ "$(id -u)" -ne 0 ]; then
-  echo "请用 sudo 运行: sudo $0" >&2
+  echo "请用 root/sudo 运行: sudo $0" >&2
   exit 1
 fi
+
+# 预检：systemd 守护 + /etc 可写，不满足则给出容器提示后退出
+if ! [ -d /run/systemd/system ]; then
+  echo "✗ 当前环境没有运行 systemd（容器场景）。"
+  echo "  本脚本只在有 systemd 的宿主机/虚机可用。"
+  echo "  容器里请改用:  ./start-bg.sh start"
+  exit 1
+fi
+if ! touch /etc/.aigw_write_test 2>/dev/null; then
+  echo "✗ /etc 不可写（只读文件系统），无法安装 systemd unit。"
+  echo "  容器里请改用:  ./start-bg.sh start"
+  exit 1
+fi
+rm -f /etc/.aigw_write_test
 
 # 1) 先停掉当前手动跑的 node server.js（避免端口冲突）
 OLD_PID=$(ss -ltnp 2>/dev/null | grep ':3100' | grep -oP 'pid=\K[0-9]+' | head -1 || true)
