@@ -138,7 +138,7 @@
               <thead><tr><th>模型</th><th style="width:80px">请求数</th><th style="width:110px">输入</th><th style="width:110px">缓存</th><th style="width:110px">输出</th><th style="width:110px">总计</th></tr></thead>
               <tbody>
                 <tr v-if="tokenModelRows().length===0"><td colspan="6" style="text-align:center;color:#c0c4cc;padding:24px">暂无数据</td></tr>
-                <tr v-for="r in tokenModelRows()" :key="'m'+r.name">
+                <tr v-for="r in tokenModelRows().slice(0, showAllTokens ? 999 : 10)" :key="'m'+r.name">
                   <td style="font-family:monospace;font-weight:600">{{ r.name }}</td>
                   <td>{{ r.requests }}</td>
                   <td>{{ fmtTokens(r.prompt) }}</td>
@@ -155,7 +155,7 @@
               <thead><tr><th>供应商</th><th style="width:80px">请求数</th><th style="width:110px">输入</th><th style="width:110px">缓存</th><th style="width:110px">输出</th><th style="width:110px">总计</th></tr></thead>
               <tbody>
                 <tr v-if="tokenProviderRows().length===0"><td colspan="6" style="text-align:center;color:#c0c4cc;padding:24px">暂无数据</td></tr>
-                <tr v-for="r in tokenProviderRows()" :key="'p'+r.name">
+                <tr v-for="r in tokenProviderRows().slice(0, showAllTokens ? 999 : 10)" :key="'p'+r.name">
                   <td style="font-weight:600">{{ r.name }}</td>
                   <td>{{ r.requests }}</td>
                   <td>{{ fmtTokens(r.prompt) }}</td>
@@ -165,39 +165,13 @@
                 </tr>
               </tbody>
             </table>
+        <div style="text-align:center;margin-top:12px">
+          <el-button v-if="!showAllTokens && (tokenModelRows().length>10||tokenProviderRows().length>10)" size="small" text @click="showAllTokens=true">展开全部 ▼</el-button>
+          <el-button v-else-if="showAllTokens" size="small" text @click="showAllTokens=false">收起 ▲</el-button>
+        </div>
           </div>
         </div>
 
-        <div class="page-header" style="margin-top:24px"><div><h3>最近请求日志</h3></div></div>
-        <div class="table-container">
-          <table class="excel-table">
-            <thead>
-              <tr>
-                <th style="width:170px">时间</th>
-                <th style="width:150px">融合模型</th>
-                <th style="width:120px">供应商</th>
-                <th>模型</th>
-                <th style="width:80px">状态</th>
-                <th style="width:100px">耗时(ms)</th>
-                <th style="min-width:200px">错误信息</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-if="logs.length === 0">
-                <td colspan="7" style="text-align:center;color:#c0c4cc;padding:40px">暂无日志，发起一次 API 请求后即可在此看到</td>
-              </tr>
-              <tr v-for="row in logs" :key="row.id || row.created_at">
-                <td>{{ row.created_at }}</td>
-                <td>{{ row.custom_model }}</td>
-                <td>{{ row.provider_name }}</td>
-                <td>{{ row.target_model }}</td>
-                <td><el-tag :type="row.success ? 'success' : 'danger'" size="small" effect="dark">{{ row.success ? '成功' : '失败' }}</el-tag></td>
-                <td>{{ row.duration_ms }}</td>
-                <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="row.error_message">{{ row.error_message || '—' }}</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
       </template>
 
       <!-- ===== 供应商管理 ===== -->
@@ -343,6 +317,59 @@
         </div>
       </template>
 
+      <!-- ===== 请求日志（分页）===== -->
+      <template v-if="activeTab === 'logs'">
+        <div class="page-header">
+          <div><h2>请求日志</h2><div class="desc">网关处理的所有 API 调用记录（分页展示）</div></div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <el-select v-model="logFilter" size="small" style="width:140px" @change="logPage=1; loadLogs()">
+              <el-option label="全部" value="" />
+              <el-option label="仅成功" value="1" />
+              <el-option label="仅失败" value="0" />
+            </el-select>
+            <el-button size="small" @click="logPage=1; loadLogs()">刷新</el-button>
+          </div>
+        </div>
+        <div class="table-container">
+          <table class="excel-table">
+            <thead>
+              <tr>
+                <th style="width:170px">时间</th>
+                <th style="width:150px">融合模型</th>
+                <th style="width:120px">供应商</th>
+                <th>模型</th>
+                <th style="width:80px">状态</th>
+                <th style="width:100px">耗时(ms)</th>
+                <th style="min-width:200px">错误信息</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-if="logPages.length === 0 && !logLoading">
+                <td colspan="7" style="text-align:center;color:#c0c4cc;padding:40px">暂无日志</td>
+              </tr>
+              <tr v-for="row in logPages" :key="row.id || row.created_at">
+                <td>{{ row.created_at }}</td>
+                <td>{{ row.custom_model }}</td>
+                <td>{{ row.provider_name }}</td>
+                <td>{{ row.target_model }}</td>
+                <td><el-tag :type="row.success ? 'success' : 'danger'" size="small" effect="dark">{{ row.success ? '成功' : '失败' }}</el-tag></td>
+                <td>{{ row.duration_ms }}</td>
+                <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="row.error_message">{{ row.error_message || '—' }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div style="display:flex;justify-content:center;align-items:center;gap:12px;margin-top:16px">
+          <el-pagination
+            v-model:current-page="logPage"
+            :page-size="logPageSize"
+            :total="logTotal"
+            layout="prev, pager, next, total"
+            small
+            @current-change="loadLogs()" />
+        </div>
+      </template>
+
       <!-- ===== 接口文档 ===== -->
       <template v-if="activeTab === 'api'">
         <div class="page-header"><div><h2>接口使用</h2><div class="desc">如何通过 API 调用融合模型</div></div></div>
@@ -458,6 +485,14 @@ const app = createApp({
     const customModels = ref([]);
     const logs = ref([]);
     const stats = reactive({});
+    // 日志分页
+    const logPages = ref([]);
+    const logPage = ref(1);
+    const logPageSize = 20;
+    const logTotal = ref(0);
+    const logLoading = ref(false);
+    const logFilter = ref('');
+    const showAllTokens = ref(false);
     const testResults = reactive({});        // { modelId: {ok, duration_ms, status, error, tested_at} }
     const testingIds = reactive(new Set());  // 正在测试中的模型 id
     const testingAll = ref(false);
@@ -470,12 +505,14 @@ const app = createApp({
       { key: 'providers', label: '供应商', icon: '🔌' },
       { key: 'models', label: '模型', icon: '🤖' },
       { key: 'fusion', label: '融合模型', icon: '🔗' },
+      { key: 'logs', label: '请求日志', icon: '📋' },
       { key: 'api', label: '接口使用', icon: '📖' },
     ];
 
     // ---- 数据加载 ----
     async function loadData() {
-      if (activeTab.value === 'dashboard') { await loadStats(); await loadLogs(); await loadTokenStats(); }
+      if (activeTab.value === 'dashboard') { await loadStats(); await loadTokenStats(); }
+      if (activeTab.value === 'logs') { await loadLogs(); }
       if (activeTab.value === 'providers') await loadProviders();
       if (activeTab.value === 'models') { await loadProviders(); await loadModels(); await loadTestResults(); }
       if (activeTab.value === 'fusion') await loadCustomModels();
@@ -502,9 +539,16 @@ const app = createApp({
     }
 
     async function loadLogs() {
-      const res = await fetch('/api/logs?limit=50');
-      const json = await res.json();
-      logs.value = json.data || [];
+      logLoading.value = true;
+      try {
+        const filter = logFilter.value ? `&success=${logFilter.value}` : '';
+        const res = await fetch(`/api/logs?limit=${logPageSize}&offset=${(logPage.value-1)*logPageSize}${filter}`);
+        const json = await res.json();
+        logPages.value = json.data || [];
+        logTotal.value = json.total || 0;
+      } finally {
+        logLoading.value = false;
+      }
     }
 
     async function loadTestResults() {
@@ -746,6 +790,7 @@ const app = createApp({
     return {
       activeTab, menu, providers, models, customModels, logs, stats, selectedProviderId, apiBase,
       loadData, loadModels, loadTokenStats, loadTestResults, testModel, testAllModels,
+      logPages, logPage, logPageSize, logTotal, logLoading, logFilter, showAllTokens, loadLogs,
       testResults, testingIds, testingAll,
       tokenStats, fmtTokens, tokenModelRows, tokenProviderRows,
       providerDialog, openProviderDialog, saveProvider, deleteProvider,
