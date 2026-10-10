@@ -1,7 +1,7 @@
 'use strict';
 
 const express = require('express');
-const { ProviderRepo, ModelRepo } = require('../db');
+const { ProviderRepo, ModelRepo, TestResultRepo } = require('../db');
 
 const router = express.Router();
 
@@ -60,6 +60,11 @@ router.get('/api/models', (req, res) => {
   res.json({ data: list });
 });
 
+// 查询所有测试结果（必须在 /:id 之前声明，否则 "test-results" 会被当成 id）
+router.get('/api/models/test-results', (req, res) => {
+  res.json({ data: TestResultRepo.all() });
+});
+
 // 单条
 router.get('/api/models/:id', (req, res) => {
   const item = ModelRepo.get(req.params.id);
@@ -92,7 +97,87 @@ router.put('/api/models/:id', (req, res) => {
 router.delete('/api/models/:id', (req, res) => {
   const ok = ModelRepo.delete(req.params.id);
   if (!ok) return res.status(404).json({ error: 'Model not found' });
+  TestResultRepo.remove(req.params.id);
   res.json({ message: 'Model deleted' });
+});
+
+// ============================================================
+//  Model Connectivity Test (模型连通性测试)
+// ============================================================
+
+/**
+ * 对单个模型做连通性测试：
+ * 发一个极小的 chat completion 请求（不流式），记录耗时与结果。
+ * - 成功：ok=true, duration_ms=实际耗时, status=上游HTTP码
+ * - 失败：ok=false, status=上游HTTP码或0(网络错误), error=可读原因
+ * - 超时：10s 内没响应即视为超时
+ */
+async function testOneModel(modelId) {
+  const m = ModelRepo.get(modelId);
+  if (!m) return { model_id: Number(modelId), ok: false, error: 'model not found', duration_ms: 0, status: 0 };
+  const provider = m; // ModelRepo.get 已带出 base_url/api_key
+
+  const url = (provider.base_url || '').replace(/\/+$/, '') + '/v1/chat/completions';
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10000); // 10s 超时
+  const start = Date.now();
+
+  let result;
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${provider.api_key || ''}`,
+      },
+      body: JSON.stringify({
+        model: provider.model_name,
+        messages: [{ role: 'user', content: 'ping' }],
+        max_tokens: 1,
+        stream: false,
+      }),
+      signal: controller.signal,
+    });
+    const duration_ms = Date.now() - start;
+    if (res.ok) {
+      await res.arrayBuffer(); // 读完释放
+      result = { model_id: m.id, ok: true, duration_ms, status: res.status, error: '' };
+    } else {
+      const text = (await res.text()).substring(0, 200);
+      result = { model_id: m.id, ok: false, duration_ms, status: res.status, error: `HTTP ${res.status}: ${text}` };
+    }
+  } catch (err) {
+    const duration_ms = Date.now() - start;
+    const timedOut = err.name === 'AbortError';
+    result = {
+      model_id: m.id,
+      ok: false,
+      duration_ms,
+      status: 0,
+      error: timedOut ? `timeout after 10000ms` : `network error: ${err.message}`,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+
+  TestResultRepo.set(result.model_id, result);
+  return result;
+}
+
+// 单模型测试
+router.post('/api/models/:id/test', async (req, res) => {
+  const result = await testOneModel(req.params.id);
+  res.json({ data: result });
+});
+
+// 测试所有模型（顺序执行，避免并发把上游打挂）
+router.post('/api/models/test-all', async (req, res) => {
+  const all = ModelRepo.list();
+  const results = [];
+  for (const m of all) {
+    results.push(await testOneModel(m.id));
+  }
+  res.json({ data: results });
 });
 
 module.exports = router;
