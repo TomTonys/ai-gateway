@@ -14,8 +14,11 @@ const app = express();
 const PORT = process.env.PORT || 3100;
 
 // 中间件
-app.use(express.json({ limit: '10mb' }));
-app.use(express.text({ type: 'application/json' })); // 允许以原始文本接收
+// 注意：只按 Content-Type 精确解析 JSON。
+// 如果不限定 type，express.json() 会把 application/octet-stream 等所有请求体
+// 都当 JSON 解析（多模态图片请求会以二进制流上传），解析失败会抛错，请求被拦下。
+app.use(express.json({ limit: '50mb', type: ['application/json', 'application/merge-patch+json'] }));
+app.use(express.text({ type: ['text/plain', 'text/*', 'application/xml', 'application/*+xml'], limit: '50mb' }));
 
 // 静态前端文件
 app.use(express.static(path.join(__dirname, 'public')));
