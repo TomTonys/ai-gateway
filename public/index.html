@@ -254,6 +254,7 @@
               <el-option v-for="p in providers" :key="p.id" :label="p.name" :value="p.id" />
             </el-select>
             <el-button type="primary" @click="openModelDialog()">+ 添加模型</el-button>
+            <el-button type="success" :loading="testingAll" @click="testAllModels">⚡ 测试所有模型</el-button>
           </div>
         </div>
         <div class="table-container">
@@ -265,14 +266,15 @@
                 <th style="min-width:150px">显示名称</th>
                 <th style="width:140px">所属供应商</th>
                 <th style="width:80px">状态</th>
+                <th style="width:110px">线上耗时</th>
                 <th style="min-width:120px">备注</th>
                 <th style="width:170px">创建时间</th>
-                <th style="width:160px">操作</th>
+                <th style="width:210px">操作</th>
               </tr>
             </thead>
             <tbody>
               <tr v-if="models.length === 0">
-                <td colspan="8" style="text-align:center;color:#c0c4cc;padding:40px">暂无模型</td>
+                <td colspan="9" style="text-align:center;color:#c0c4cc;padding:40px">暂无模型</td>
               </tr>
               <tr v-for="row in models" :key="row.id">
                 <td>{{ row.id }}</td>
@@ -280,9 +282,17 @@
                 <td>{{ row.display_name || row.model_name }}</td>
                 <td>{{ row.provider_name }}</td>
                 <td><el-tag :type="row.status==='active'?'success':'info'" size="small">{{ row.status==='active'?'启用':'停用' }}</el-tag></td>
+                <td>
+                  <template v-if="testingIds.has(row.id)"><el-tag type="warning" size="small" effect="plain">测试中…</el-tag></template>
+                  <template v-else-if="testResults[row.id] && testResults[row.id].ok"><el-tag type="success" size="small" effect="dark">{{ testResults[row.id].duration_ms }} ms</el-tag></template>
+                  <template v-else-if="testResults[row.id] && /timeout/i.test(testResults[row.id].error)"><el-tag type="danger" size="small" effect="dark">超时</el-tag></template>
+                  <template v-else-if="testResults[row.id]"><el-tooltip :content="testResults[row.id].error" placement="top"><el-tag type="danger" size="small" effect="plain">Fail ({{ testResults[row.id].status || '网络' }})</el-tag></el-tooltip></template>
+                  <template v-else><span style="color:#c0c4cc">未测试</span></template>
+                </td>
                 <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="row.remark">{{ row.remark || '—' }}</td>
                 <td>{{ row.created_at }}</td>
                 <td style="white-space:nowrap">
+                  <el-button size="small" @click="testModel(row)" :loading="testingIds.has(row.id)">测试</el-button>
                   <el-button size="small" type="primary" @click="openModelDialog(row)">编辑</el-button>
                   <el-button size="small" type="danger" @click="deleteModel(row)">删除</el-button>
                 </td>
@@ -448,6 +458,9 @@ const app = createApp({
     const customModels = ref([]);
     const logs = ref([]);
     const stats = reactive({});
+    const testResults = reactive({});        // { modelId: {ok, duration_ms, status, error, tested_at} }
+    const testingIds = reactive(new Set());  // 正在测试中的模型 id
+    const testingAll = ref(false);
     const tokenStats = reactive({ total: { prompt:0, completion:0, total:0, cached:0, requests:0 }, by_model: {}, by_provider: {} });
     const selectedProviderId = ref(null);
     const apiBase = location.origin;
@@ -464,7 +477,7 @@ const app = createApp({
     async function loadData() {
       if (activeTab.value === 'dashboard') { await loadStats(); await loadLogs(); await loadTokenStats(); }
       if (activeTab.value === 'providers') await loadProviders();
-      if (activeTab.value === 'models') { await loadProviders(); await loadModels(); }
+      if (activeTab.value === 'models') { await loadProviders(); await loadModels(); await loadTestResults(); }
       if (activeTab.value === 'fusion') await loadCustomModels();
     }
 
@@ -492,6 +505,53 @@ const app = createApp({
       const res = await fetch('/api/logs?limit=50');
       const json = await res.json();
       logs.value = json.data || [];
+    }
+
+    async function loadTestResults() {
+      const res = await fetch('/api/models/test-results');
+      const json = await res.json();
+      Object.keys(testResults).forEach(k => delete testResults[k]);
+      const data = json.data || {};
+      Object.keys(data).forEach(k => { testResults[k] = data[k]; });
+    }
+
+    async function testModel(row) {
+      testingIds.add(row.id);
+      await loadTestResults();
+      try {
+        const res = await fetch(`/api/models/${row.id}/test`, { method: 'POST' });
+        const json = await res.json();
+        const r = json.data;
+        if (r.ok) {
+          ElementPlus.ElMessage.success(`「${row.model_name}」连通正常，耗时 ${r.duration_ms}ms`);
+        } else if (/timeout/i.test(r.error)) {
+          ElementPlus.ElMessage.warning(`「${row.model_name}」测试超时（>10s）`);
+        } else {
+          ElementPlus.ElMessage.error(`「${row.model_name}」测试失败：${r.error}`);
+        }
+        await loadTestResults();
+      } finally {
+        testingIds.delete(row.id);
+      }
+    }
+
+    async function testAllModels() {
+      testingAll.value = true;
+      try {
+        const res = await fetch('/api/models/test-all', { method: 'POST' });
+        const json = await res.json();
+        const results = json.data || [];
+        const okCount = results.filter(r => r.ok).length;
+        const failCount = results.length - okCount;
+        if (results.length === 0) {
+          ElementPlus.ElMessage.info('没有可测试的模型');
+        } else {
+          ElementPlus.ElMessage.success(`测试完成：${okCount} 成功 / ${failCount} 失败`);
+        }
+        await loadTestResults();
+      } finally {
+        testingAll.value = false;
+      }
     }
 
     async function loadStats() {
@@ -581,6 +641,7 @@ const app = createApp({
     async function deleteModel(row) {
       try { await ElementPlus.ElMessageBox.confirm(`确定删除模型 "${row.model_name}"？`, '删除确认', { type:'warning' }); } catch { return; }
       await fetch(`/api/models/${row.id}`, { method:'DELETE' });
+      delete testResults[row.id];
       ElementPlus.ElMessage.success('模型已删除');
       await loadModels();
     }
@@ -684,7 +745,8 @@ const app = createApp({
 
     return {
       activeTab, menu, providers, models, customModels, logs, stats, selectedProviderId, apiBase,
-      loadData, loadModels, loadTokenStats,
+      loadData, loadModels, loadTokenStats, loadTestResults, testModel, testAllModels,
+      testResults, testingIds, testingAll,
       tokenStats, fmtTokens, tokenModelRows, tokenProviderRows,
       providerDialog, openProviderDialog, saveProvider, deleteProvider,
       modelDialog, openModelDialog, saveModel, deleteModel,
