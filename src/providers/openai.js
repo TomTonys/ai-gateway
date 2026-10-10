@@ -8,14 +8,36 @@
 
 /**
  * 判断一个 HTTP 响应是否应被视为"可重试错误"。
- * 4xx（除 429 外）通常是客户端参数错误，不应重试；
+ * 4xx 通常是客户端参数错误，不应重试；但有例外：
+ *   - 400 + "invalid image"/"unsupported"/"modality"/"multimodal" 等 → 模型不支持该输入格式，应重试到下一个模型
+ *   - 400 + "inference request is invalid" / "invalid request" → 可能是请求格式不被当前模型接受，也应重试
+ *   - 401/403 认证失败 → 不重试（该供应商的 key 有问题）
+ *   - 404 模型不存在 → 不重试
+ *   - 413 请求体过大 → 不重试
  * 5xx、429、网络错误应当重试到下一个模型。
+ * @param {number} status HTTP 状态码
+ * @param {string|null} err 网络层错误消息
+ * @param {string|null} body 错误响应体（含具体错误信息，用于判断 400 是否可重试）
  */
-function isRetryableError(status, err) {
+function isRetryableError(status, err, body) {
   if (err) return true;                       // 网络层异常
   if (status >= 500) return true;             // 服务端错误
   if (status === 429) return true;            // 限流
-  if (status >= 400 && status < 500) return false; // 客户端错误不重试
+
+  // 4xx 判断：部分 400 错误意味着"这个模型不支持这种输入"，应重试到下一个模型
+  if (status === 400 && body) {
+    const lower = body.toLowerCase();
+    const retryablePatterns = [
+      'invalid image', 'unsupported', 'modality', 'multimodal',
+      'invalid image_url', 'not supported', 'image',
+      'inference request is invalid', 'invalid request',
+      'does not support', 'unsupported model',
+    ];
+    if (retryablePatterns.some(p => lower.includes(p))) return true;
+  }
+
+  // 401/403/404/413 等 → 不重试
+  if (status >= 400 && status < 500) return false;
   return false;
 }
 
@@ -73,7 +95,7 @@ async function callProvider(member, { body, stream }) {
         status: res.status,
         headers: res.headers,
         error: `Provider [${provider_name}/${model_name}] returned ${res.status}: ${text.substring(0, 500)}`,
-        retryable: isRetryableError(res.status, null),
+        retryable: isRetryableError(res.status, null, text),
       };
     }
 
