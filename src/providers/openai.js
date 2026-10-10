@@ -46,6 +46,9 @@ async function callProvider(member, { body, stream }) {
     if (payload[k] === null) delete payload[k];
   }
 
+  // 请求体清洗：补全 stream_options，让流式最后一个 chunk 也能带 usage
+  if (stream) payload.stream_options = { ...(payload.stream_options || {}), include_usage: true };
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 120000); // 2 分钟超时
 
@@ -73,11 +76,15 @@ async function callProvider(member, { body, stream }) {
       };
     }
 
+    // 非流式：直接读 JSON 拿到 usage（prompt/completion/cached）
+    // 流式：保持 res 原样透传；usage 由上层在转发时边读边解析（见 gateway.js）
+    const usage = stream ? null : await readJsonUsage(res);
     return {
       ok: true,
       status: res.status,
       headers: res.headers,
-      res,  // 返回原始 Response 供上层 pipe
+      res,
+      usage,
     };
   } catch (err) {
     clearTimeout(timeout);
@@ -90,4 +97,26 @@ async function callProvider(member, { body, stream }) {
   }
 }
 
-module.exports = { callProvider, isRetryableError };
+/**
+ * 从非流式 JSON 响应里提取 usage。
+ * 不同供应商 usage 字段略有差异，这里做归一化，缺省补 0。
+ * @returns {{prompt_tokens:number, completion_tokens:number, total_tokens:number, prompt_tokens_details?:object, cached_tokens:number}|null}
+ */
+async function readJsonUsage(res) {
+  try {
+    const json = await res.clone().json();
+    const u = json.usage;
+    if (!u) return null;
+    const details = u.prompt_tokens_details || {};
+    return {
+      prompt_tokens: u.prompt_tokens || 0,
+      completion_tokens: u.completion_tokens || 0,
+      total_tokens: u.total_tokens || (u.prompt_tokens || 0) + (u.completion_tokens || 0),
+      cached_tokens: details.cached_tokens || u.cached_tokens || 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+module.exports = { callProvider, isRetryableError, readJsonUsage };

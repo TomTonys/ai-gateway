@@ -1,7 +1,7 @@
 'use strict';
 
 const { CustomModelRepo, LogRepo } = require('./db');
-const { callProvider } = require('./providers/openai');
+const { callProvider, readJsonUsage } = require('./providers/openai');
 
 /**
  * 网关核心：融合模型请求调度
@@ -76,7 +76,7 @@ async function handleChatCompletion(req, res) {
       });
 
       if (stream && result.res) {
-        // 流式透传
+        // 流式透传 + 边转发边解析 usage（最后一个 chunk 携带 usage，stream_options.include_usage=true）
         res.setHeader('Content-Type', 'text/event-stream');
         res.setHeader('Cache-Control', 'no-cache');
         res.setHeader('Connection', 'keep-alive');
@@ -84,21 +84,8 @@ async function handleChatCompletion(req, res) {
         res.setHeader('X-Gateway-Model', member.model_name);
         res.status(result.status);
 
-        const reader = result.res.body.getReader();
-        const pump = async () => {
-          try {
-            while (true) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              res.write(Buffer.from(value));
-            }
-          } catch (e) {
-            // 客户端断开等
-          } finally {
-            res.end();
-          }
-        };
-        pump();
+        const usage = await pumpStreamWithUsage(result.res, res);
+        LogRecordUsage({ requestedModel, member, duration, usage });
         return;
       } else if (result.res) {
         // 非流式透传
@@ -106,6 +93,7 @@ async function handleChatCompletion(req, res) {
         res.setHeader('X-Gateway-Provider', member.provider_name);
         res.setHeader('X-Gateway-Model', member.model_name);
         res.status(result.status).json(json);
+        LogRecordUsage({ requestedModel, member, duration, usage: result.usage });
         return;
       }
     }
@@ -152,6 +140,69 @@ async function handleChatCompletion(req, res) {
       details: errors,
       attempted_models: members.map(m => `${m.provider_name}/${m.model_name}`),
     }
+  });
+}
+
+
+/**
+ * 透传 SSE 流的同时，从 chunk 中捕获 usage。
+ * 很多 OpenAI 兼容服务端（含 stream_options.include_usage=true 的响应）
+ * 会在最后一个 data: chunk 里附带 usage 字段。这里把 usage 与已写入的
+ * 透传 buffer 解耦：先读完整个流、一边 res.write 一边解析，结束后把
+ * 捕获到的 usage 返回给调用方。
+ */
+async function pumpStreamWithUsage(res, target) {
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let buf = '';
+  let usage = null;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      target.write(Buffer.from(value));
+      buf += decoder.decode(value, { stream: true });
+      // 按 SSE 的 event 分割，逐块查找带 usage 的 data 行
+      const parts = buf.split('\n\n');
+      buf = parts.pop();
+      for (const part of parts) {
+        const m = part.match(/^data:\s*(\{.*\})\s*$/m);
+        if (m) {
+          try {
+            const j = JSON.parse(m[1]);
+            if (j && j.usage && typeof j.usage === 'object') usage = j.usage;
+          } catch {}
+        }
+      }
+    }
+  } catch (e) {
+    // 客户端断开等
+  } finally {
+    target.end();
+  }
+  // 归一化 usage
+  if (usage) {
+    const details = usage.prompt_tokens_details || {};
+    return {
+      prompt_tokens: usage.prompt_tokens || 0,
+      completion_tokens: usage.completion_tokens || 0,
+      total_tokens: usage.total_tokens || 0,
+      cached_tokens: details.cached_tokens || 0,
+    };
+  }
+  return null;
+}
+
+/**
+ * 把 usage 写入日志（仅成功请求才会调用）
+ */
+function LogRecordUsage({ usage }) {
+  if (!usage) return;
+  LogRepo.updateLastUsage({
+    prompt_tokens: usage.prompt_tokens || 0,
+    completion_tokens: usage.completion_tokens || 0,
+    total_tokens: usage.total_tokens || 0,
+    cached_tokens: usage.cached_tokens || 0,
   });
 }
 

@@ -47,6 +47,9 @@
 
     /* 统计卡片 */
     .stat-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 16px; margin-bottom: 24px; }
+    .token-cards { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
+    .token-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 900px) { .token-panels { grid-template-columns: 1fr; } }
     .stat-card { background: #fff; border-radius: 10px; padding: 20px; box-shadow: 0 1px 4px rgba(0,0,0,0.06); display: flex; align-items: center; gap: 16px; }
     .stat-card .stat-icon { width: 48px; height: 48px; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 22px; color: #fff; }
     .stat-card .stat-info .value { font-size: 28px; font-weight: 700; }
@@ -119,6 +122,52 @@
           <div class="stat-card"><div class="stat-icon" style="background:#e6a23c">🔗</div><div class="stat-info"><div class="value">{{ stats.customModelCount || 0 }}</div><div class="label">融合模型</div></div></div>
           <div class="stat-card"><div class="stat-icon" style="background:#f56c6c">📊</div><div class="stat-info"><div class="value">{{ stats.total || 0 }}</div><div class="label">总请求数</div></div></div>
         </div>
+
+        <!-- ===== Token 消耗统计 ===== -->
+        <div class="page-header" style="margin-top:24px"><div><h3>Token 消耗统计</h3><div class="desc">{{ tokenStats.window_days > 0 ? '近 ' + tokenStats.window_days + ' 天' : '全部时间' }} 成功请求的累计用量（输入 / 缓存 / 输出）</div></div></div>
+        <div class="stat-cards token-cards">
+          <div class="stat-card"><div class="stat-icon" style="background:#409eff">📥</div><div class="stat-info"><div class="value">{{ fmtTokens(tokenStats.total.prompt) }}</div><div class="label">输入 Tokens（prompt）</div></div></div>
+          <div class="stat-card"><div class="stat-icon" style="background:#e6a23c">🧠</div><div class="stat-info"><div class="value">{{ fmtTokens(tokenStats.total.cached) }}</div><div class="label">缓存 Tokens（cached）</div></div></div>
+          <div class="stat-card"><div class="stat-icon" style="background:#67c23a">📤</div><div class="stat-info"><div class="value">{{ fmtTokens(tokenStats.total.completion) }}</div><div class="label">输出 Tokens（completion）</div></div></div>
+          <div class="stat-card"><div class="stat-icon" style="background:#909399">📈</div><div class="stat-info"><div class="value">{{ fmtTokens(tokenStats.total.total) }}</div><div class="label">总 Tokens</div></div></div>
+        </div>
+        <div class="token-panels">
+          <div class="table-container" style="margin-top:16px">
+            <div style="padding:10px 14px;font-weight:600;border-bottom:1px solid #ebeef5;font-size:13px;color:#606266">按模型分布</div>
+            <table class="excel-table">
+              <thead><tr><th>模型</th><th style="width:80px">请求数</th><th style="width:110px">输入</th><th style="width:110px">缓存</th><th style="width:110px">输出</th><th style="width:110px">总计</th></tr></thead>
+              <tbody>
+                <tr v-if="tokenModelRows().length===0"><td colspan="6" style="text-align:center;color:#c0c4cc;padding:24px">暂无数据</td></tr>
+                <tr v-for="r in tokenModelRows()" :key="'m'+r.name">
+                  <td style="font-family:monospace;font-weight:600">{{ r.name }}</td>
+                  <td>{{ r.requests }}</td>
+                  <td>{{ fmtTokens(r.prompt) }}</td>
+                  <td style="color:#e6a23c">{{ fmtTokens(r.cached) }}</td>
+                  <td>{{ fmtTokens(r.completion) }}</td>
+                  <td style="font-weight:700">{{ fmtTokens(r.total) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="table-container" style="margin-top:16px">
+            <div style="padding:10px 14px;font-weight:600;border-bottom:1px solid #ebeef5;font-size:13px;color:#606266">按供应商分布</div>
+            <table class="excel-table">
+              <thead><tr><th>供应商</th><th style="width:80px">请求数</th><th style="width:110px">输入</th><th style="width:110px">缓存</th><th style="width:110px">输出</th><th style="width:110px">总计</th></tr></thead>
+              <tbody>
+                <tr v-if="tokenProviderRows().length===0"><td colspan="6" style="text-align:center;color:#c0c4cc;padding:24px">暂无数据</td></tr>
+                <tr v-for="r in tokenProviderRows()" :key="'p'+r.name">
+                  <td style="font-weight:600">{{ r.name }}</td>
+                  <td>{{ r.requests }}</td>
+                  <td>{{ fmtTokens(r.prompt) }}</td>
+                  <td style="color:#e6a23c">{{ fmtTokens(r.cached) }}</td>
+                  <td>{{ fmtTokens(r.completion) }}</td>
+                  <td style="font-weight:700">{{ fmtTokens(r.total) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
         <div class="page-header" style="margin-top:24px"><div><h3>最近请求日志</h3></div></div>
         <div class="table-container">
           <table class="excel-table">
@@ -399,6 +448,7 @@ const app = createApp({
     const customModels = ref([]);
     const logs = ref([]);
     const stats = reactive({});
+    const tokenStats = reactive({ total: { prompt:0, completion:0, total:0, cached:0, requests:0 }, by_model: {}, by_provider: {} });
     const selectedProviderId = ref(null);
     const apiBase = location.origin;
 
@@ -412,7 +462,7 @@ const app = createApp({
 
     // ---- 数据加载 ----
     async function loadData() {
-      if (activeTab.value === 'dashboard') { await loadStats(); await loadLogs(); }
+      if (activeTab.value === 'dashboard') { await loadStats(); await loadLogs(); await loadTokenStats(); }
       if (activeTab.value === 'providers') await loadProviders();
       if (activeTab.value === 'models') { await loadProviders(); await loadModels(); }
       if (activeTab.value === 'fusion') await loadCustomModels();
@@ -457,6 +507,36 @@ const app = createApp({
       stats.total = sRes.data.total || 0;
       stats.success = sRes.data.success || 0;
       stats.failed = sRes.data.failed || 0;
+    }
+
+    async function loadTokenStats() {
+      const res = await fetch('/api/token-stats');
+      const json = await res.json();
+      const d = json.data || {};
+      Object.assign(tokenStats, {
+        total: d.total || { prompt:0, completion:0, total:0, cached:0, requests:0 },
+        by_model: d.by_model || {},
+        by_provider: d.by_provider || {},
+      });
+    }
+
+    function fmtTokens(n) {
+      n = Number(n) || 0;
+      if (n >= 1000000) return (n/1000000).toFixed(2) + 'M';
+      if (n >= 10000)  return (n/1000).toFixed(1) + 'K';
+      if (n >= 1000)   return (n/1000).toFixed(2) + 'K';
+      return String(n);
+    }
+
+    function tokenModelRows() {
+      const rows = Object.entries(tokenStats.by_model || {}).map(([name, v]) => ({ name, ...v }));
+      rows.sort((a, b) => (b.total||0) - (a.total||0));
+      return rows;
+    }
+    function tokenProviderRows() {
+      const rows = Object.entries(tokenStats.by_provider || {}).map(([name, v]) => ({ name, ...v }));
+      rows.sort((a, b) => (b.total||0) - (a.total||0));
+      return rows;
     }
 
     // ---- 供应商 ----
@@ -604,7 +684,8 @@ const app = createApp({
 
     return {
       activeTab, menu, providers, models, customModels, logs, stats, selectedProviderId, apiBase,
-      loadData, loadModels,
+      loadData, loadModels, loadTokenStats,
+      tokenStats, fmtTokens, tokenModelRows, tokenProviderRows,
       providerDialog, openProviderDialog, saveProvider, deleteProvider,
       modelDialog, openModelDialog, saveModel, deleteModel,
       customModelDialog, openCustomModelDialog, saveCustomModel, deleteCustomModel,

@@ -14,7 +14,7 @@ const fs = require('fs');
 const path = require('path');
 
 const DATA_FILE = path.join(__dirname, '..', 'data', 'gateway.json');
-const LOG_CAP = 500;
+const LOG_CAP = 2000;
 
 function defaultData() {
   return {
@@ -353,7 +353,7 @@ const CustomModelRepo = {
 //  Request Logs
 // ============================================================
 const LogRepo = {
-  create({ custom_model, target_model, provider_name, status_code, success, duration_ms, error_message }) {
+  create({ custom_model, target_model, provider_name, status_code, success, duration_ms, error_message, usage }) {
     store.logs.unshift({
       id: nextId('log'),
       custom_model: custom_model || '',
@@ -363,9 +363,25 @@ const LogRepo = {
       success: success ? 1 : 0,
       duration_ms: duration_ms || 0,
       error_message: error_message || '',
+      prompt_tokens: usage ? (usage.prompt_tokens || 0) : 0,
+      completion_tokens: usage ? (usage.completion_tokens || 0) : 0,
+      total_tokens: usage ? (usage.total_tokens || 0) : 0,
+      cached_tokens: usage ? (usage.cached_tokens || 0) : 0,
       created_at: now(),
     });
     if (store.logs.length > LOG_CAP) store.logs.length = LOG_CAP;
+    persist();
+    return store.logs[0];
+  },
+
+  /** 更新最近一条日志的 usage（流式场景：透传完成后才拿到 usage） */
+  updateLastUsage({ prompt_tokens, completion_tokens, total_tokens, cached_tokens }) {
+    const log = store.logs[0];
+    if (!log) return;
+    log.prompt_tokens = prompt_tokens || 0;
+    log.completion_tokens = completion_tokens || 0;
+    log.total_tokens = total_tokens || 0;
+    log.cached_tokens = cached_tokens || 0;
     persist();
   },
 
@@ -377,7 +393,48 @@ const LogRepo = {
     const total = store.logs.length;
     const success = store.logs.filter(l => l.success === 1).length;
     return { total, success, failed: total - success };
+  },
+
+  /**
+   * Token 消耗聚合统计（仅统计成功请求；失败请求无 usage）
+   * @param {number} [days] 时间窗口（天），默认全部
+   */
+  tokenStats(days = 0) {
+    const logs = store.logs;
+    const since = days > 0 ? Date.now() - days * 86400000 : 0;
+    const rows = logs.filter(l => l.success === 1 && (!since || parseDateTime(l.created_at) >= since));
+    const sum = { prompt: 0, completion: 0, total: 0, cached: 0, requests: rows.length };
+    const byModel = {};
+    const byProvider = {};
+    for (const l of rows) {
+      sum.prompt += l.prompt_tokens || 0;
+      sum.completion += l.completion_tokens || 0;
+      sum.total += l.total_tokens || 0;
+      sum.cached += l.cached_tokens || 0;
+      const mk = l.target_model || '(unknown)';
+      byModel[mk] = byModel[mk] || { requests: 0, prompt: 0, completion: 0, total: 0, cached: 0 };
+      byModel[mk].requests += 1;
+      byModel[mk].prompt += l.prompt_tokens || 0;
+      byModel[mk].completion += l.completion_tokens || 0;
+      byModel[mk].total += l.total_tokens || 0;
+      byModel[mk].cached += l.cached_tokens || 0;
+      const pk = l.provider_name || '(unknown)';
+      byProvider[pk] = byProvider[pk] || { requests: 0, prompt: 0, completion: 0, total: 0, cached: 0 };
+      byProvider[pk].requests += 1;
+      byProvider[pk].prompt += l.prompt_tokens || 0;
+      byProvider[pk].completion += l.completion_tokens || 0;
+      byProvider[pk].total += l.total_tokens || 0;
+      byProvider[pk].cached += l.cached_tokens || 0;
+    }
+    return { total: sum, by_model: byModel, by_provider: byProvider, window_days: days };
   }
 };
+
+function parseDateTime(s) {
+  // "YYYY-MM-DD HH:mm:ss" -> 毫秒时间戳（本地时区）
+  if (!s) return 0;
+  const t = new Date(s.replace(' ', 'T')).getTime();
+  return Number.isNaN(t) ? 0 : t;
+}
 
 module.exports = { ProviderRepo, ModelRepo, CustomModelRepo, LogRepo };

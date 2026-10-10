@@ -40,4 +40,10 @@ router.get('/api/stats', (req, res) => {
   res.json({ data: LogRepo.stats() });
 });
 
+// Token 消耗统计（支持 ?days=7 时间窗口，0/缺省=全部）
+router.get('/api/token-stats', (req, res) => {
+  const days = Math.max(0, parseInt(req.query.days) || 0);
+  res.json({ data: LogRepo.tokenStats(days) });
+});
+
 module.exports = router;
