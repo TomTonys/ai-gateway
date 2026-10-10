@@ -1,0 +1,12 @@
+# Node
+node_modules/
+npm-debug.log*
+
+# 运行时数据（含 API key，绝不提交）
+data/
+
+# 开发期截图（可选提交，先忽略）
+docs/
+
+# OS
+.DS_Store
