@@ -385,8 +385,17 @@ const LogRepo = {
     persist();
   },
 
-  list(limit = 50) {
-    return store.logs.slice(0, limit);
+  list(limit = 50, offset = 0, filter = null) {
+    let rows = store.logs;
+    if (filter !== null) {
+      rows = rows.filter(l => (filter === '1' ? l.success === 1 : l.success === 0));
+    }
+    return rows.slice(offset, offset + limit);
+  },
+
+  count(filter = null) {
+    if (filter === null) return store.logs.length;
+    return store.logs.filter(l => (filter === '1' ? l.success === 1 : l.success === 0)).length;
   },
 
   stats() {
