@@ -132,7 +132,9 @@ async function testOneModel(modelId) {
       },
       body: JSON.stringify({
         model: provider.model_name,
-        messages: [{ role: 'user', content: 'ping' }],
+        // 多模态兼容：content 用 OpenAI 规定的数组形式，纯文本模型也接受；
+        // 单元素字符串 content 会被部分严格服务端拒（"content must be array"）。
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'ping' }] }],
         max_tokens: 1,
         stream: false,
       }),
