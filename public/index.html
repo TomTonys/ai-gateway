@@ -321,12 +321,12 @@
       <template v-if="activeTab === 'logs'">
         <div class="page-header">
           <div><h2>请求日志</h2><div class="desc">网关处理的所有 API 调用记录（分页展示）</div></div>
-          <div style="display:flex;gap:8px;align-items:center">
-            <el-select v-model="logFilter" size="small" style="width:140px" @change="logPage=1; loadLogs()">
-              <el-option label="全部" value="" />
-              <el-option label="仅成功" value="1" />
-              <el-option label="仅失败" value="0" />
-            </el-select>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <el-button-group size="small">
+              <el-button :type="logFilter==='' ? 'primary' : 'default'" @click="logFilter=''; logPage=1; loadLogs()">全部</el-button>
+              <el-button :type="logFilter==='1' ? 'primary' : 'default'" @click="logFilter='1'; logPage=1; loadLogs()">仅成功</el-button>
+              <el-button :type="logFilter==='0' ? 'primary' : 'default'" @click="logFilter='0'; logPage=1; loadLogs()">仅失败</el-button>
+            </el-button-group>
             <el-button size="small" @click="logPage=1; loadLogs()">刷新</el-button>
           </div>
         </div>
