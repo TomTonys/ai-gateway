@@ -1,0 +1,620 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI API Gateway 控制台</title>
+  <link rel="stylesheet" href="/lib/element-plus.css">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; background: #f0f2f5; color: #303133; }
+    [v-cloak] { display: none; }
+
+    .layout { display: flex; min-height: 100vh; }
+
+    /* 侧边栏 */
+    .sidebar {
+      width: 240px; min-height: 100vh;
+      background: linear-gradient(180deg, #1a1a2e 0%, #16213e 100%);
+      color: #a0a0b0; flex-shrink: 0;
+      display: flex; flex-direction: column;
+    }
+    .sidebar-header { padding: 20px 20px 16px; border-bottom: 1px solid rgba(255,255,255,0.08); }
+    .sidebar-header h1 { font-size: 20px; color: #fff; font-weight: 700; display: flex; align-items: center; gap: 10px; }
+    .sidebar-header .subtitle { font-size: 12px; color: #6c6c80; margin-top: 4px; }
+    .menu { list-style: none; padding: 12px 0; flex: 1; }
+    .menu li {
+      padding: 13px 24px; cursor: pointer; font-size: 14px;
+      transition: all 0.2s; display: flex; align-items: center; gap: 12px;
+      border-left: 3px solid transparent;
+    }
+    .menu li:hover { background: rgba(255,255,255,0.05); color: #fff; }
+    .menu li.active { background: rgba(64,158,255,0.12); color: #409eff; border-left-color: #409eff; }
+    .menu li .icon { font-size: 18px; width: 20px; text-align: center; }
+    .sidebar-footer { padding: 16px 24px; border-top: 1px solid rgba(255,255,255,0.08); font-size: 12px; }
+    .stat-badge { display: flex; gap: 16px; }
+    .stat-badge .stat { text-align: center; flex: 1; }
+    .stat-badge .stat .num { font-size: 20px; font-weight: 700; color: #fff; }
+    .stat-badge .stat .label { font-size: 11px; color: #6c6c80; margin-top: 2px; }
+    .stat-badge .stat.success .num { color: #67c23a; }
+    .stat-badge .stat.fail .num { color: #f56c6c; }
+
+    /* 主内容 */
+    .main { flex: 1; padding: 24px 32px; overflow-y: auto; max-height: 100vh; }
+    .page-header { margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; }
+    .page-header h2 { font-size: 22px; font-weight: 700; }
+    .page-header .desc { font-size: 13px; color: #909399; margin-top: 4px; }
+
+    /* 统计卡片 */
+    .stat-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 16px; margin-bottom: 24px; }
+    .stat-card { background: #fff; border-radius: 10px; padding: 20px; box-shadow: 0 1px 4px rgba(0,0,0,0.06); display: flex; align-items: center; gap: 16px; }
+    .stat-card .stat-icon { width: 48px; height: 48px; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 22px; color: #fff; }
+    .stat-card .stat-info .value { font-size: 28px; font-weight: 700; }
+    .stat-card .stat-info .label { font-size: 13px; color: #909399; }
+
+    /* 表格容器 + 经典 Excel 网格样式 */
+    .table-container { background: #fff; border-radius: 10px; box-shadow: 0 1px 4px rgba(0,0,0,0.06); overflow: hidden; border: 1px solid #dcdfe6; }
+    .excel-table { width: 100%; border-collapse: collapse; font-size: 13px; background: #fff; }
+    .excel-table th {
+      background: #f5f7fa; color: #303133; font-weight: 700;
+      border: 1px solid #dcdfe6; padding: 10px 12px; text-align: left; white-space: nowrap;
+    }
+    .excel-table td {
+      border: 1px solid #dcdfe6; padding: 10px 12px; vertical-align: middle;
+    }
+    .excel-table tr:hover td { background: #ecf5ff; }
+
+    /* 融合模型成员 */
+    .member-row { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid #f0f0f0; }
+    .member-row:last-child { border-bottom: none; }
+    .priority-badge { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 6px; font-size: 13px; font-weight: 700; background: #ecf5ff; color: #409eff; }
+    .member-info { flex: 1; }
+    .member-info .model-name { font-weight: 600; font-size: 14px; }
+    .member-info .provider-name { font-size: 12px; color: #909399; }
+    .tag-small { font-size: 11px; padding: 1px 6px; border-radius: 4px; }
+
+    .endpoint-info { background: #f8f9fa; border-radius: 8px; padding: 16px; margin-bottom: 20px; font-family: 'Fira Code', 'Consolas', monospace; font-size: 13px; line-height: 1.8; }
+    .endpoint-info .key { color: #909399; }
+    .endpoint-info .val { color: #303133; font-weight: 600; }
+    .endpoint-info .copy-btn { float: right; }
+
+    /* 成员添加区 */
+    .add-member-box { background: #f5f7fa; border: 1px dashed #d0d0d8; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+    .add-member-box .add-label { font-size: 13px; font-weight: 700; color: #606266; margin-bottom: 10px; display: block; }
+    .add-member-box .add-row { display: flex; gap: 12px; align-items: center; }
+    .add-member-box .add-row .el-select { flex: 1; }
+    .empty-hint { text-align: center; padding: 40px 20px; color: #c0c4cc; font-size: 14px; }
+  </style>
+</head>
+<body>
+<div id="app" v-cloak>
+  <div class="layout">
+    <!-- 侧边栏 -->
+    <div class="sidebar">
+      <div class="sidebar-header">
+        <h1>⚡ AI Gateway</h1>
+        <div class="subtitle">API 融合路由网关</div>
+      </div>
+      <ul class="menu">
+        <li v-for="item in menu" :key="item.key" :class="{active: activeTab === item.key}" @click="activeTab = item.key; loadData()">
+          <span class="icon" v-html="item.icon"></span> {{ item.label }}
+        </li>
+      </ul>
+      <div class="sidebar-footer">
+        <div class="stat-badge">
+          <div class="stat success"><div class="num">{{ stats.success || 0 }}</div><div class="label">成功</div></div>
+          <div class="stat fail"><div class="num">{{ stats.failed || 0 }}</div><div class="label">失败</div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 主内容区 -->
+    <div class="main">
+      <!-- ===== 仪表盘 ===== -->
+      <template v-if="activeTab === 'dashboard'">
+        <div class="page-header"><div><h2>仪表盘</h2><div class="desc">网关运行状态总览</div></div></div>
+        <div class="stat-cards">
+          <div class="stat-card"><div class="stat-icon" style="background:#409eff">🔌</div><div class="stat-info"><div class="value">{{ stats.providerCount || 0 }}</div><div class="label">供应商数量</div></div></div>
+          <div class="stat-card"><div class="stat-icon" style="background:#67c23a">🤖</div><div class="stat-info"><div class="value">{{ stats.modelCount || 0 }}</div><div class="label">模型数量</div></div></div>
+          <div class="stat-card"><div class="stat-icon" style="background:#e6a23c">🔗</div><div class="stat-info"><div class="value">{{ stats.customModelCount || 0 }}</div><div class="label">融合模型</div></div></div>
+          <div class="stat-card"><div class="stat-icon" style="background:#f56c6c">📊</div><div class="stat-info"><div class="value">{{ stats.total || 0 }}</div><div class="label">总请求数</div></div></div>
+        </div>
+        <div class="page-header" style="margin-top:24px"><div><h3>最近请求日志</h3></div></div>
+        <div class="table-container">
+          <table class="excel-table">
+            <thead>
+              <tr>
+                <th style="width:170px">时间</th>
+                <th style="width:150px">融合模型</th>
+                <th style="width:120px">供应商</th>
+                <th>模型</th>
+                <th style="width:80px">状态</th>
+                <th style="width:100px">耗时(ms)</th>
+                <th style="min-width:200px">错误信息</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-if="logs.length === 0">
+                <td colspan="7" style="text-align:center;color:#c0c4cc;padding:40px">暂无日志，发起一次 API 请求后即可在此看到</td>
+              </tr>
+              <tr v-for="row in logs" :key="row.id || row.created_at">
+                <td>{{ row.created_at }}</td>
+                <td>{{ row.custom_model }}</td>
+                <td>{{ row.provider_name }}</td>
+                <td>{{ row.target_model }}</td>
+                <td><el-tag :type="row.success ? 'success' : 'danger'" size="small" effect="dark">{{ row.success ? '成功' : '失败' }}</el-tag></td>
+                <td>{{ row.duration_ms }}</td>
+                <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="row.error_message">{{ row.error_message || '—' }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </template>
+
+      <!-- ===== 供应商管理 ===== -->
+      <template v-if="activeTab === 'providers'">
+        <div class="page-header">
+          <div><h2>供应商管理</h2><div class="desc">添加和管理 AI API 供应商</div></div>
+          <el-button type="primary" @click="openProviderDialog()">+ 添加供应商</el-button>
+        </div>
+        <div class="table-container">
+          <table class="excel-table">
+            <thead>
+              <tr>
+                <th style="width:60px">ID</th>
+                <th style="width:150px">名称</th>
+                <th style="min-width:250px">Base URL</th>
+                <th style="width:90px">类型</th>
+                <th style="width:100px">API Key</th>
+                <th style="width:80px">模型数</th>
+                <th style="width:80px">状态</th>
+                <th style="min-width:120px">备注</th>
+                <th style="width:240px">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-if="providers.length === 0">
+                <td colspan="9" style="text-align:center;color:#c0c4cc;padding:40px">暂无供应商，点击右上角「添加供应商」</td>
+              </tr>
+              <tr v-for="row in providers" :key="row.id">
+                <td>{{ row.id }}</td>
+                <td style="font-weight:600">{{ row.name }}</td>
+                <td style="max-width:350px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:monospace" :title="row.base_url">{{ row.base_url }}</td>
+                <td>{{ row.api_type }}</td>
+                <td style="color:#909399">••••••••</td>
+                <td><el-tag size="small">{{ row.model_count }}</el-tag></td>
+                <td><el-tag :type="row.status==='active'?'success':'info'" size="small">{{ row.status==='active'?'启用':'停用' }}</el-tag></td>
+                <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="row.remark">{{ row.remark || '—' }}</td>
+                <td style="white-space:nowrap">
+                  <el-button size="small" @click="selectedProviderId=row.id; activeTab='models'; loadData()">管理模型</el-button>
+                  <el-button size="small" type="primary" @click="openProviderDialog(row)">编辑</el-button>
+                  <el-button size="small" type="danger" @click="deleteProvider(row)">删除</el-button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </template>
+
+      <!-- ===== 模型管理 ===== -->
+      <template v-if="activeTab === 'models'">
+        <div class="page-header">
+          <div><h2>模型管理</h2><div class="desc">为供应商添加模型</div></div>
+          <div style="display:flex;gap:12px;align-items:center">
+            <el-select v-model="selectedProviderId" placeholder="选择供应商过滤" clearable style="width:200px" @change="loadModels">
+              <el-option v-for="p in providers" :key="p.id" :label="p.name" :value="p.id" />
+            </el-select>
+            <el-button type="primary" @click="openModelDialog()">+ 添加模型</el-button>
+          </div>
+        </div>
+        <div class="table-container">
+          <table class="excel-table">
+            <thead>
+              <tr>
+                <th style="width:60px">ID</th>
+                <th style="min-width:150px">模型名称</th>
+                <th style="min-width:150px">显示名称</th>
+                <th style="width:140px">所属供应商</th>
+                <th style="width:80px">状态</th>
+                <th style="min-width:120px">备注</th>
+                <th style="width:170px">创建时间</th>
+                <th style="width:160px">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-if="models.length === 0">
+                <td colspan="8" style="text-align:center;color:#c0c4cc;padding:40px">暂无模型</td>
+              </tr>
+              <tr v-for="row in models" :key="row.id">
+                <td>{{ row.id }}</td>
+                <td style="font-family:monospace;font-weight:600">{{ row.model_name }}</td>
+                <td>{{ row.display_name || row.model_name }}</td>
+                <td>{{ row.provider_name }}</td>
+                <td><el-tag :type="row.status==='active'?'success':'info'" size="small">{{ row.status==='active'?'启用':'停用' }}</el-tag></td>
+                <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="row.remark">{{ row.remark || '—' }}</td>
+                <td>{{ row.created_at }}</td>
+                <td style="white-space:nowrap">
+                  <el-button size="small" type="primary" @click="openModelDialog(row)">编辑</el-button>
+                  <el-button size="small" type="danger" @click="deleteModel(row)">删除</el-button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </template>
+
+      <!-- ===== 融合模型管理 ===== -->
+      <template v-if="activeTab === 'fusion'">
+        <div class="page-header">
+          <div><h2>融合模型管理</h2><div class="desc">将多个供应商模型融合为一个虚拟模型，支持按优先级自动重试</div></div>
+          <el-button type="primary" @click="openCustomModelDialog()">+ 创建融合模型</el-button>
+        </div>
+        <div class="table-container">
+          <table class="excel-table">
+            <thead>
+              <tr>
+                <th style="width:60px">ID</th>
+                <th style="min-width:150px">融合模型名</th>
+                <th style="min-width:200px">描述</th>
+                <th style="width:120px">重试模式</th>
+                <th style="width:80px">成员数</th>
+                <th style="width:80px">状态</th>
+                <th style="width:240px">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-if="customModels.length === 0">
+                <td colspan="7" style="text-align:center;color:#c0c4cc;padding:40px">暂无融合模型</td>
+              </tr>
+              <tr v-for="row in customModels" :key="row.id">
+                <td>{{ row.id }}</td>
+                <td><el-tag type="warning" effect="dark">{{ row.name }}</el-tag></td>
+                <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="row.description">{{ row.description || '—' }}</td>
+                <td><el-tag size="small" type="info">{{ row.retry_mode==='priority'?'按优先级':'按顺序' }}</el-tag></td>
+                <td><el-tag size="small" type="success">{{ row.member_count }}</el-tag></td>
+                <td><el-tag :type="row.status==='active'?'success':'info'" size="small">{{ row.status==='active'?'启用':'停用' }}</el-tag></td>
+                <td style="white-space:nowrap">
+                  <el-button size="small" @click="openMemberDialog(row)">配置成员</el-button>
+                  <el-button size="small" type="primary" @click="openCustomModelDialog(row)">编辑</el-button>
+                  <el-button size="small" type="danger" @click="deleteCustomModel(row)">删除</el-button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </template>
+
+      <!-- ===== 接口文档 ===== -->
+      <template v-if="activeTab === 'api'">
+        <div class="page-header"><div><h2>接口使用</h2><div class="desc">如何通过 API 调用融合模型</div></div></div>
+        <div class="endpoint-info">
+          <span class="key">POST</span> <span class="val">{{ apiBase }}/v1/chat/completions</span>
+          <p style="margin-top:12px"><span class="key">Header:</span></p>
+          <p><span class="val">Content-Type: application/json</span></p>
+          <p><span class="val">Authorization: Bearer &lt;任意值&gt;</span></p>
+          <p style="margin-top:12px"><span class="key">Body 示例:</span></p>
+          <pre style="background:#f0f0f0;padding:12px;border-radius:6px;margin-top:4px;overflow-x:auto">{
+  "model": "my-fusion-model",
+  "messages": [
+    {"role": "user", "content": "你好"}
+  ],
+  "stream": false
+}</pre>
+          <p style="margin-top:12px"><span class="key">说明：</span> <span class="val">model</span> 填写你在融合模型管理中创建的模型名。网关会按优先级依次尝试该融合模型下的各供应商模型，成功则返回结果，失败自动切换到下一个。</p>
+          <p style="margin-top:8px"><span class="key">查看可用模型:</span> <span class="val">GET {{ apiBase }}/v1/models</span></p>
+        </div>
+        <el-alert title="无需鉴权" type="success" :closable="false" description="当前网关不校验 Authorization 头，可传任意值。生产环境建议加上鉴权中间件。" />
+      </template>
+    </div>
+  </div>
+
+  <!-- ===== 供应商弹窗 ===== -->
+  <el-dialog v-model="providerDialog.visible" :title="providerDialog.isEdit ? '编辑供应商' : '添加供应商'" width="540px">
+    <el-form :model="providerDialog.form" label-width="100px">
+      <el-form-item label="名称" required><el-input v-model="providerDialog.form.name" placeholder="如: OpenAI / DeepSeek / 本地 Ollama" /></el-form-item>
+      <el-form-item label="Base URL" required><el-input v-model="providerDialog.form.base_url" placeholder="如: https://api.openai.com" /></el-form-item>
+      <el-form-item label="API Key"><el-input v-model="providerDialog.form.api_key" type="password" show-password placeholder="sk-..." /></el-form-item>
+      <el-form-item label="API 类型"><el-select v-model="providerDialog.form.api_type" style="width:100%"><el-option label="OpenAI 兼容" value="openai" /><el-option label="自定义" value="custom" /></el-select></el-form-item>
+      <el-form-item label="状态"><el-select v-model="providerDialog.form.status" style="width:100%"><el-option label="启用" value="active" /><el-option label="停用" value="inactive" /></el-select></el-form-item>
+      <el-form-item label="备注"><el-input v-model="providerDialog.form.remark" type="textarea" :rows="2" /></el-form-item>
+    </el-form>
+    <template #footer><el-button @click="providerDialog.visible=false">取消</el-button><el-button type="primary" @click="saveProvider">保存</el-button></template>
+  </el-dialog>
+
+  <!-- ===== 模型弹窗 ===== -->
+  <el-dialog v-model="modelDialog.visible" :title="modelDialog.isEdit ? '编辑模型' : '添加模型'" width="540px">
+    <el-form :model="modelDialog.form" label-width="100px">
+      <el-form-item label="供应商" required>
+        <el-select v-model="modelDialog.form.provider_id" placeholder="选择供应商" style="width:100%" :disabled="modelDialog.isEdit">
+          <el-option v-for="p in providers" :key="p.id" :label="p.name" :value="p.id" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="模型名称" required><el-input v-model="modelDialog.form.model_name" placeholder="供应商侧真实模型名，如 gpt-4o / deepseek-chat" /></el-form-item>
+      <el-form-item label="显示名称"><el-input v-model="modelDialog.form.display_name" placeholder="控制台展示名（留空同模型名）" /></el-form-item>
+      <el-form-item label="状态"><el-select v-model="modelDialog.form.status" style="width:100%"><el-option label="启用" value="active" /><el-option label="停用" value="inactive" /></el-select></el-form-item>
+      <el-form-item label="备注"><el-input v-model="modelDialog.form.remark" type="textarea" :rows="2" /></el-form-item>
+    </el-form>
+    <template #footer><el-button @click="modelDialog.visible=false">取消</el-button><el-button type="primary" @click="saveModel">保存</el-button></template>
+  </el-dialog>
+
+  <!-- ===== 融合模型弹窗 ===== -->
+  <el-dialog v-model="customModelDialog.visible" :title="customModelDialog.isEdit ? '编辑融合模型' : '创建融合模型'" width="540px">
+    <el-form :model="customModelDialog.form" label-width="100px">
+      <el-form-item label="模型名称" required><el-input v-model="customModelDialog.form.name" placeholder="对外暴露的虚拟模型名，如 my-gpt-4" /></el-form-item>
+      <el-form-item label="描述"><el-input v-model="customModelDialog.form.description" type="textarea" :rows="2" placeholder="如: GPT-4 多供应商高可用融合" /></el-form-item>
+      <el-form-item label="重试模式">
+        <el-select v-model="customModelDialog.form.retry_mode" style="width:100%">
+          <el-option label="按优先级（priority 越小越先调用）" value="priority" />
+          <el-option label="按顺序（成员列表顺序）" value="sequence" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="状态"><el-select v-model="customModelDialog.form.status" style="width:100%"><el-option label="启用" value="active" /><el-option label="停用" value="inactive" /></el-select></el-form-item>
+    </el-form>
+    <template #footer><el-button @click="customModelDialog.visible=false">取消</el-button><el-button type="primary" @click="saveCustomModel">保存</el-button></template>
+  </el-dialog>
+
+  <!-- ===== 成员管理弹窗 ===== -->
+  <el-dialog v-model="memberDialog.visible" :title="'配置成员 — ' + memberDialog.customModelName" width="680px">
+    <!-- 添加成员区 -->
+    <div class="add-member-box">
+      <span class="add-label">➕ 添加模型到融合模型</span>
+      <div class="add-row">
+        <el-select v-model="memberDialog.addModelId" filterable placeholder="① 先选择要添加的模型" style="flex:1" @change="onAddModelSelect">
+          <el-option v-for="m in availableModelsForAdd" :key="m.id" :label="m.display_name + ' (' + m.provider_name + ')'" :value="m.id" />
+        </el-select>
+        <el-input-number v-model="memberDialog.addPriority" :min="0" :max="999" placeholder="优先级" controls-position="right" style="width:150px" />
+      </div>
+      <div style="margin-top:12px">
+        <el-button type="success" size="large" style="width:100%" @click="addMember">② 添加所选模型</el-button>
+      </div>
+      <div v-if="availableModelsForAdd.length===0 && models.length>0" style="margin-top:8px;font-size:12px;color:#909399">所有启用状态的模型均已添加，如需添加请先到「模型」页面新建。</div>
+      <div v-if="models.length===0" style="margin-top:8px;font-size:12px;color:#f56c6c">模型列表为空，请先到「模型」页面添加模型。</div>
+    </div>
+    <div v-if="memberDialog.members.length===0" class="empty-hint">📝 暂无成员，请从上方添加模型</div>
+    <div v-for="member in memberDialog.members" :key="member.member_id" class="member-row">
+      <span class="priority-badge">{{ member.priority }}</span>
+      <div class="member-info">
+        <div class="model-name">{{ member.display_name }} <span class="tag-small" style="background:#ecf5ff;color:#409eff">{{ member.model_name }}</span></div>
+        <div class="provider-name">供应商: {{ member.provider_name }}</div>
+      </div>
+      <el-input-number v-model="member.priority" :min="0" :max="999" size="small" controls-position="right" style="width:110px" @change="updateMember(member)" />
+      <el-switch v-model="member.enabled" :active-value="1" :inactive-value="0" @change="updateMember(member)" />
+      <el-button size="small" type="danger" plain @click="removeMember(member)">移除</el-button>
+    </div>
+    <template #footer><el-button @click="memberDialog.visible=false">关闭</el-button></template>
+  </el-dialog>
+</div>
+
+<script src="/lib/vue.global.prod.js"></script>
+<script src="/lib/element-plus.full.min.js"></script>
+<script src="/lib/zh-cn.min.js"></script>
+<script>
+const { createApp, reactive, ref, onMounted, computed, watch } = Vue;
+
+const app = createApp({
+  setup() {
+    const activeTab = ref(location.hash.replace('#', '') || 'dashboard');
+    const providers = ref([]);
+    const models = ref([]);
+    const customModels = ref([]);
+    const logs = ref([]);
+    const stats = reactive({});
+    const selectedProviderId = ref(null);
+    const apiBase = location.origin;
+
+    const menu = [
+      { key: 'dashboard', label: '仪表盘', icon: '📊' },
+      { key: 'providers', label: '供应商', icon: '🔌' },
+      { key: 'models', label: '模型', icon: '🤖' },
+      { key: 'fusion', label: '融合模型', icon: '🔗' },
+      { key: 'api', label: '接口使用', icon: '📖' },
+    ];
+
+    // ---- 数据加载 ----
+    async function loadData() {
+      if (activeTab.value === 'dashboard') { await loadStats(); await loadLogs(); }
+      if (activeTab.value === 'providers') await loadProviders();
+      if (activeTab.value === 'models') { await loadProviders(); await loadModels(); }
+      if (activeTab.value === 'fusion') await loadCustomModels();
+    }
+
+    async function loadProviders() {
+      const res = await fetch('/api/providers');
+      const json = await res.json();
+      providers.value = json.data || [];
+    }
+
+    async function loadModels(all) {
+      // all=true 时加载全部模型（用于成员弹窗），否则按 selectedProviderId 过滤
+      const url = (!all && selectedProviderId.value) ? `/api/models?provider_id=${selectedProviderId.value}` : '/api/models';
+      const res = await fetch(url);
+      const json = await res.json();
+      models.value = json.data || [];
+    }
+
+    async function loadCustomModels() {
+      const res = await fetch('/api/custom-models');
+      const json = await res.json();
+      customModels.value = json.data || [];
+    }
+
+    async function loadLogs() {
+      const res = await fetch('/api/logs?limit=50');
+      const json = await res.json();
+      logs.value = json.data || [];
+    }
+
+    async function loadStats() {
+      const [pRes, mRes, cmRes, sRes] = await Promise.all([
+        fetch('/api/providers').then(r=>r.json()),
+        fetch('/api/models').then(r=>r.json()),
+        fetch('/api/custom-models').then(r=>r.json()),
+        fetch('/api/stats').then(r=>r.json()),
+      ]);
+      stats.providerCount = (pRes.data||[]).length;
+      stats.modelCount = (mRes.data||[]).length;
+      stats.customModelCount = (cmRes.data||[]).length;
+      stats.total = sRes.data.total || 0;
+      stats.success = sRes.data.success || 0;
+      stats.failed = sRes.data.failed || 0;
+    }
+
+    // ---- 供应商 ----
+    const providerDialog = reactive({ visible: false, isEdit: false, editingId: null, form: {} });
+    function openProviderDialog(row) {
+      providerDialog.isEdit = !!row;
+      providerDialog.editingId = row?.id;
+      providerDialog.form = row ? { ...row } : { name:'', base_url:'', api_key:'', api_type:'openai', status:'active', remark:'' };
+      providerDialog.visible = true;
+    }
+    async function saveProvider() {
+      const method = providerDialog.isEdit ? 'PUT' : 'POST';
+      const url = providerDialog.isEdit ? `/api/providers/${providerDialog.editingId}` : '/api/providers';
+      await fetch(url, { method, headers:{'Content-Type':'application/json'}, body: JSON.stringify(providerDialog.form) });
+      providerDialog.visible = false;
+      ElementPlus.ElMessage.success(providerDialog.isEdit ? '供应商已更新' : '供应商已创建');
+      await loadProviders();
+    }
+    async function deleteProvider(row) {
+      try { await ElementPlus.ElMessageBox.confirm(`确定删除供应商 "${row.name}"？该操作会级联删除其下所有模型。`, '删除确认', { type:'warning' }); } catch { return; }
+      await fetch(`/api/providers/${row.id}`, { method:'DELETE' });
+      ElementPlus.ElMessage.success('供应商已删除');
+      await loadProviders();
+    }
+
+    // ---- 模型 ----
+    const modelDialog = reactive({ visible: false, isEdit: false, editingId: null, form: {} });
+    function openModelDialog(row) {
+      modelDialog.isEdit = !!row;
+      modelDialog.editingId = row?.id;
+      modelDialog.form = row ? { ...row } : { provider_id: selectedProviderId.value || '', model_name:'', display_name:'', status:'active', remark:'' };
+      modelDialog.visible = true;
+    }
+    async function saveModel() {
+      const method = modelDialog.isEdit ? 'PUT' : 'POST';
+      const url = modelDialog.isEdit ? `/api/models/${modelDialog.editingId}` : '/api/models';
+      await fetch(url, { method, headers:{'Content-Type':'application/json'}, body: JSON.stringify(modelDialog.form) });
+      modelDialog.visible = false;
+      ElementPlus.ElMessage.success(modelDialog.isEdit ? '模型已更新' : '模型已创建');
+      await loadModels();
+    }
+    async function deleteModel(row) {
+      try { await ElementPlus.ElMessageBox.confirm(`确定删除模型 "${row.model_name}"？`, '删除确认', { type:'warning' }); } catch { return; }
+      await fetch(`/api/models/${row.id}`, { method:'DELETE' });
+      ElementPlus.ElMessage.success('模型已删除');
+      await loadModels();
+    }
+
+    // ---- 融合模型 ----
+    const customModelDialog = reactive({ visible: false, isEdit: false, editingId: null, form: {} });
+    function openCustomModelDialog(row) {
+      customModelDialog.isEdit = !!row;
+      customModelDialog.editingId = row?.id;
+      customModelDialog.form = row ? { ...row } : { name:'', description:'', retry_mode:'priority', status:'active' };
+      customModelDialog.visible = true;
+    }
+    async function saveCustomModel() {
+      const method = customModelDialog.isEdit ? 'PUT' : 'POST';
+      const url = customModelDialog.isEdit ? `/api/custom-models/${customModelDialog.editingId}` : '/api/custom-models';
+      await fetch(url, { method, headers:{'Content-Type':'application/json'}, body: JSON.stringify(customModelDialog.form) });
+      customModelDialog.visible = false;
+      ElementPlus.ElMessage.success(customModelDialog.isEdit ? '融合模型已更新' : '融合模型已创建');
+      await loadCustomModels();
+    }
+    async function deleteCustomModel(row) {
+      try { await ElementPlus.ElMessageBox.confirm(`确定删除融合模型 "${row.name}"？`, '删除确认', { type:'warning' }); } catch { return; }
+      await fetch(`/api/custom-models/${row.id}`, { method:'DELETE' });
+      ElementPlus.ElMessage.success('融合模型已删除');
+      await loadCustomModels();
+    }
+
+    // ---- 成员管理 ----
+    const memberDialog = reactive({ visible: false, customModelId: null, customModelName: '', members: [], addModelId: null, addPriority: 0 });
+    const availableModelsForAdd = computed(() => {
+      const memberIds = new Set(memberDialog.members.map(m => m.model_id));
+      return models.value.filter(m => !memberIds.has(m.id) && m.status === 'active');
+    });
+    async function openMemberDialog(row) {
+      memberDialog.customModelId = row.id;
+      memberDialog.customModelName = row.name;
+      memberDialog.members = [];
+      memberDialog.addModelId = null;
+      memberDialog.addPriority = 0;
+      memberDialog.visible = true;
+      // 始终加载全量模型列表（不受供应商过滤影响）
+      await loadModels(true);
+      const res = await fetch(`/api/custom-models/${row.id}/members`);
+      const json = await res.json();
+      memberDialog.members = (json.data || []).map(m => ({ ...m }));
+    }
+    async function onAddModelSelect(val) {
+      // 下拉框选中模型时的回调（确保 addModelId 被更新）
+      memberDialog.addModelId = val;
+      if (val) {
+        ElementPlus.ElMessage.success('已选择模型，点击「添加模型」按钮提交');
+      }
+    }
+    async function addMember() {
+      if (!memberDialog.addModelId) {
+        ElementPlus.ElMessage.warning('请先选择要添加的模型');
+        return;
+      }
+      try {
+        const res = await fetch(`/api/custom-models/${memberDialog.customModelId}/members`, {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ model_id: memberDialog.addModelId, priority: memberDialog.addPriority })
+        });
+        if (!res.ok) {
+          const err = await res.json();
+          ElementPlus.ElMessage.error('添加失败：' + (err.error || res.statusText));
+          return;
+        }
+        ElementPlus.ElMessage.success('成员已添加');
+        // 刷新成员列表
+        const mres = await fetch(`/api/custom-models/${memberDialog.customModelId}/members`);
+        memberDialog.members = (await mres.json()).data.map(m => ({...m}));
+        memberDialog.addModelId = null;
+        memberDialog.addPriority = 0;
+      } catch (e) {
+        ElementPlus.ElMessage.error('添加失败：' + e.message);
+      }
+    }
+    async function updateMember(member) {
+      await fetch(`/api/custom-models/${memberDialog.customModelId}/members/${member.member_id}`, {
+        method:'PUT', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ priority: member.priority, enabled: member.enabled })
+      });
+    }
+    async function removeMember(member) {
+      await fetch(`/api/custom-models/${memberDialog.customModelId}/members/${member.member_id}`, { method:'DELETE' });
+      ElementPlus.ElMessage.success('成员已移除');
+      memberDialog.members = memberDialog.members.filter(m => m.member_id !== member.member_id);
+    }
+
+    onMounted(async () => {
+      await loadData();
+      // hash 路由：URL 变化时切换标签
+      window.addEventListener('hashchange', () => {
+        const t = location.hash.replace('#', '');
+        if (t && t !== activeTab.value) { activeTab.value = t; loadData(); }
+      });
+    });
+    // 标签变化时同步 URL hash
+    watch(activeTab, (v) => { if (location.hash !== '#' + v) location.hash = v; });
+
+    return {
+      activeTab, menu, providers, models, customModels, logs, stats, selectedProviderId, apiBase,
+      loadData, loadModels,
+      providerDialog, openProviderDialog, saveProvider, deleteProvider,
+      modelDialog, openModelDialog, saveModel, deleteModel,
+      customModelDialog, openCustomModelDialog, saveCustomModel, deleteCustomModel,
+      memberDialog, availableModelsForAdd, openMemberDialog, addMember, updateMember, removeMember,
+    };
+  }
+});
+
+app.use(ElementPlus, { locale: ElementPlusLocaleZhCn });
+app.mount('#app');
+</script>
+</body>
+</html>
