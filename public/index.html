@@ -239,6 +239,7 @@
                 <th style="min-width:150px">模型名称</th>
                 <th style="min-width:150px">显示名称</th>
                 <th style="width:140px">所属供应商</th>
+                <th style="width:110px">请求方式</th>
                 <th style="width:80px">状态</th>
                 <th style="width:110px">线上耗时</th>
                 <th style="min-width:120px">备注</th>
@@ -248,13 +249,14 @@
             </thead>
             <tbody>
               <tr v-if="models.length === 0">
-                <td colspan="9" style="text-align:center;color:#c0c4cc;padding:40px">暂无模型</td>
+                <td colspan="10" style="text-align:center;color:#c0c4cc;padding:40px">暂无模型</td>
               </tr>
               <tr v-for="row in models" :key="row.id">
                 <td>{{ row.id }}</td>
                 <td style="font-family:monospace;font-weight:600">{{ row.model_name }}</td>
                 <td>{{ row.display_name || row.model_name }}</td>
                 <td>{{ row.provider_name }}</td>
+                <td><el-tag :type="row.request_method==='responses'?'primary':'info'" size="small" effect="plain">{{ row.request_method==='responses' ? 'Responses' : 'Chat' }}</el-tag></td>
                 <td><el-tag :type="row.status==='active'?'success':'info'" size="small">{{ row.status==='active'?'启用':'停用' }}</el-tag></td>
                 <td>
                   <template v-if="testingIds.has(row.id)"><el-tag type="warning" size="small" effect="plain">测试中…</el-tag></template>
@@ -420,6 +422,13 @@
       </el-form-item>
       <el-form-item label="模型名称" required><el-input v-model="modelDialog.form.model_name" placeholder="供应商侧真实模型名，如 gpt-4o / deepseek-chat" /></el-form-item>
       <el-form-item label="显示名称"><el-input v-model="modelDialog.form.display_name" placeholder="控制台展示名（留空同模型名）" /></el-form-item>
+      <el-form-item label="请求方式">
+        <el-radio-group v-model="modelDialog.form.request_method">
+          <el-radio value="chat">Chat Completions (/chat/completions)</el-radio>
+          <el-radio value="responses">Responses (/responses)</el-radio>
+        </el-radio-group>
+        <div style="font-size:11px;color:#909399;margin-top:2px">选 Responses 时网关会把请求体转成 Responses 格式发给上游</div>
+      </el-form-item>
       <el-form-item label="状态"><el-select v-model="modelDialog.form.status" style="width:100%"><el-option label="启用" value="active" /><el-option label="停用" value="inactive" /></el-select></el-form-item>
       <el-form-item label="备注"><el-input v-model="modelDialog.form.remark" type="textarea" :rows="2" /></el-form-item>
     </el-form>
@@ -674,7 +683,7 @@ const app = createApp({
     function openModelDialog(row) {
       modelDialog.isEdit = !!row;
       modelDialog.editingId = row?.id;
-      modelDialog.form = row ? { ...row } : { provider_id: selectedProviderId.value || '', model_name:'', display_name:'', status:'active', remark:'' };
+      modelDialog.form = row ? { ...row, request_method: row.request_method || 'chat' } : { provider_id: selectedProviderId.value || '', model_name:'', display_name:'', status:'active', request_method:'chat', remark:'' };
       modelDialog.visible = true;
     }
     async function saveModel() {
