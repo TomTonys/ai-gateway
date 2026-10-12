@@ -398,7 +398,10 @@
   <el-dialog v-model="providerDialog.visible" :title="providerDialog.isEdit ? '编辑供应商' : '添加供应商'" width="540px">
     <el-form :model="providerDialog.form" label-width="100px">
       <el-form-item label="名称" required><el-input v-model="providerDialog.form.name" placeholder="如: OpenAI / DeepSeek / 本地 Ollama" /></el-form-item>
-      <el-form-item label="Base URL" required><el-input v-model="providerDialog.form.base_url" placeholder="如: https://api.openai.com" /></el-form-item>
+      <el-form-item label="Base URL" required>
+        <el-input v-model="providerDialog.form.base_url" placeholder="如: https://open.bigmodel.cn/api/paas/v4" />
+        <div style="font-size:11px;color:#909399;margin-top:2px">填到版本号的完整前缀（各家 v1/v4 不同），网关自动在其后接 /chat/completions</div>
+      </el-form-item>
       <el-form-item label="API Key"><el-input v-model="providerDialog.form.api_key" type="password" show-password placeholder="sk-..." /></el-form-item>
       <el-form-item label="API 类型"><el-select v-model="providerDialog.form.api_type" style="width:100%"><el-option label="OpenAI 兼容" value="openai" /><el-option label="自定义" value="custom" /></el-select></el-form-item>
       <el-form-item label="状态"><el-select v-model="providerDialog.form.status" style="width:100%"><el-option label="启用" value="active" /><el-option label="停用" value="inactive" /></el-select></el-form-item>
