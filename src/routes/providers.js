@@ -74,12 +74,18 @@ router.get('/api/models/:id', (req, res) => {
 
 // 创建
 router.post('/api/models', (req, res) => {
-  const { provider_id, model_name, display_name, remark } = req.body;
+  const { provider_id, model_name, display_name, remark, request_method } = req.body;
   if (!provider_id || !model_name) {
     return res.status(400).json({ error: 'provider_id and model_name are required' });
   }
   try {
-    ModelRepo.create({ provider_id, model_name, display_name, remark });
+    ModelRepo.create({
+      provider_id,
+      model_name,
+      display_name,
+      remark,
+      request_method: request_method === 'responses' ? 'responses' : 'chat',
+    });
     res.status(201).json({ message: 'Model created' });
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -88,7 +94,14 @@ router.post('/api/models', (req, res) => {
 
 // 更新
 router.put('/api/models/:id', (req, res) => {
-  const ok = ModelRepo.update(req.params.id, req.body);
+  const { model_name, display_name, status, remark, request_method } = req.body;
+  if (request_method !== undefined && !['chat', 'responses'].includes(request_method)) {
+    return res.status(400).json({ error: "request_method must be 'chat' or 'responses'" });
+  }
+  const ok = ModelRepo.update(req.params.id, {
+    model_name, display_name, status, remark,
+    request_method: request_method === undefined ? undefined : request_method,
+  });
   if (!ok) return res.status(404).json({ error: 'Model not found' });
   res.json({ message: 'Model updated' });
 });
@@ -116,9 +129,29 @@ async function testOneModel(modelId) {
   const m = ModelRepo.get(modelId);
   if (!m) return { model_id: Number(modelId), ok: false, error: 'model not found', duration_ms: 0, status: 0 };
   const provider = m; // ModelRepo.get 已带出 base_url/api_key
+  const method = m.request_method === 'responses' ? 'responses' : 'chat';
 
-  const { buildChatUrl } = require('../providers/openai');
-  const url = buildChatUrl(provider.base_url);
+  const { buildUrl, toResponsesPayload } = require('../providers/openai');
+  const url = buildUrl(provider.base_url, method);
+
+  // 按请求方式构造最小探测请求
+  let probe;
+  if (method === 'responses') {
+    probe = toResponsesPayload({
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'ping' }] }],
+      max_tokens: 1,
+    }, provider.model_name);
+  } else {
+    probe = {
+      model: provider.model_name,
+      // 多模态兼容：content 用 OpenAI 规定的数组形式，纯文本模型也接受；
+      // 单元素字符串 content 会被部分严格服务端拒（"content must be array"）。
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'ping' }] }],
+      max_tokens: 1,
+      stream: false,
+    };
+  }
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 10000); // 10s 超时
   const start = Date.now();
@@ -131,14 +164,7 @@ async function testOneModel(modelId) {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${provider.api_key || ''}`,
       },
-      body: JSON.stringify({
-        model: provider.model_name,
-        // 多模态兼容：content 用 OpenAI 规定的数组形式，纯文本模型也接受；
-        // 单元素字符串 content 会被部分严格服务端拒（"content must be array"）。
-        messages: [{ role: 'user', content: [{ type: 'text', text: 'ping' }] }],
-        max_tokens: 1,
-        stream: false,
-      }),
+      body: JSON.stringify(probe),
       signal: controller.signal,
     });
     const duration_ms = Date.now() - start;
