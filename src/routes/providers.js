@@ -117,7 +117,8 @@ async function testOneModel(modelId) {
   if (!m) return { model_id: Number(modelId), ok: false, error: 'model not found', duration_ms: 0, status: 0 };
   const provider = m; // ModelRepo.get 已带出 base_url/api_key
 
-  const url = (provider.base_url || '').replace(/\/+$/, '') + '/v1/chat/completions';
+  const { buildChatUrl } = require('../providers/openai');
+  const url = buildChatUrl(provider.base_url);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 10000); // 10s 超时
   const start = Date.now();
