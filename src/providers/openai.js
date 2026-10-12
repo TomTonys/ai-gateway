@@ -42,20 +42,100 @@ function isRetryableError(status, err, body) {
 }
 
 /**
- * 构造 chat completions 请求 URL。
+ * 构造请求 URL。
  *
  * base_url 的语义是「填到版本号为止的完整前缀」，由各供应商自己决定，例如：
  *   https://open.bigmodel.cn/api/paas/v4   （智谱，版本含在地址里）
  *   https://token.sensenova.cn/v1           （Sensenova）
  *   https://api.openai.com                  （OpenAI，不带版本号）
- * 网关只在其后拼 /chat/completions，不猜测、不改写版本号——上游升到 v5/v6
- * 时，只需改供应商配置里的 base_url，无需动代码。
+ * 网关只在 base_url 后拼端点，不猜测、不改写版本号——上游升到 v5/v6 时，
+ * 只需改供应商配置里的 base_url，无需动代码。
  *
- * 已存在的 base_url 若已含 /v1（如 .../v1）也能直接工作，不做归一化。
+ * @param {string} base_url 供应商前缀
+ * @param {string} method 请求方式：'chat' → /chat/completions；'responses' → /responses
  */
-function buildChatUrl(base_url) {
+function buildUrl(base_url, method) {
   const base = (base_url || '').trim().replace(/\/+$/, '');
-  return base + '/chat/completions';
+  return method === 'responses' ? base + '/responses' : base + '/chat/completions';
+}
+
+/** 兼容旧调用（providers.js / healthcheck.js 等历史引用） */
+const buildChatUrl = (base_url) => buildUrl(base_url, 'chat');
+
+/**
+ * 把 chat/completions 风格的请求体转成 Responses API 风格。
+ *
+ * 网关对外仍是 /v1/chat/completions 协议；仅当某模型选择 responses 请求方式时，
+ * 网关内部把请求体转成 Responses 格式发给上游，响应再透传回客户端（上游返回的是
+ * Responses 结构，OpenAI 官方客户端可直接使用，网关自身不做二次翻译——
+ * 网关的 chat 协议与上游协议由"请求方式"配置解耦）。
+ *
+ * 转换规则：
+ *   - messages[].content（string 或 [{type:'text'/'image_url'}]）→ input
+ *   - system 消息提升到 instructions
+ *   - max_tokens → max_output_tokens（部分兼容实现两个都认，双写）
+ *   - 其余参数（temperature、top_p、response_format 等）原样透传
+ */
+function toResponsesPayload(payload, model_name) {
+  const p = { ...payload };
+  p.model = model_name;
+
+  if (Array.isArray(p.messages)) {
+    let instructions;
+    const items = [];
+    for (const msg of p.messages) {
+      const role = msg.role;
+      const content = msg.content;
+      if (role === 'system') {
+        const text = typeof content === 'string'
+          ? content
+          : Array.isArray(content)
+            ? content.map(c => (typeof c === 'string' ? c : (c && (c.text !== undefined ? c.text : c.input_text)) || '')).join('')
+            : String(content ?? '');
+        instructions = instructions ? `${instructions}\n${text}` : text;
+        continue;
+      }
+      if (typeof content === 'string') {
+        items.push({ type: 'message', role, content });
+        continue;
+      }
+      if (Array.isArray(content)) {
+        const parts = [];
+        for (const c of content) {
+          if (c === null || c === undefined) continue;
+          if (typeof c === 'string') {
+            parts.push({ type: 'input_text', text: c });
+          } else if (c.type === 'text' && c.text !== undefined) {
+            parts.push({ type: 'input_text', text: c.text });
+          } else if (c.type === 'image_url') {
+            const url = (c.image_url && c.image_url.url) || c.url || '';
+            if (url) {
+              const part = { type: 'input_image', image_url: url };
+              if (c.image_url && c.image_url.detail) part.detail = c.image_url.detail;
+              if (c.filename) part.filename = c.filename;
+              parts.push(part);
+            }
+          }
+        }
+        items.push({ type: 'message', role, content: parts });
+        continue;
+      }
+      items.push({ type: 'message', role, content: String(content ?? '') });
+    }
+    p.input = items;
+    delete p.messages;
+    if (instructions) p.instructions = instructions;
+  } else if (p.input === undefined) {
+    p.input = [];
+  }
+
+  if (p.max_tokens !== undefined) {
+    p.max_output_tokens = p.max_output_tokens ?? p.max_tokens;
+    // 双写：部分兼容实现只认 max_tokens
+    // （max_output_tokens 已设置，max_tokens 保留原值）
+  }
+  for (const k of Object.keys(p)) if (p[k] === null) delete p[k];
+  return p;
 }
 
 /**
@@ -64,11 +144,57 @@ function buildChatUrl(base_url) {
  */
 async function callProvider(member, { body, stream }) {
   const { base_url, api_key, model_name, provider_name } = member;
-
-  const url = buildChatUrl(base_url);
+  const method = member.request_method === 'responses' ? 'responses' : 'chat';
+  const url = buildUrl(base_url, method);
 
   // 替换请求体中的 model 为供应商侧真实模型名
   const payload = JSON.parse(body || '{}');
+
+  if (method === 'responses') {
+    // Responses API：网关对外是 chat/completions 协议，这里把请求体转成
+    // Responses 格式（messages→input，system→instructions，max_tokens→max_output_tokens）。
+    // 响应不二次翻译——上游返回 Responses 结构，OpenAI 官方客户端可直接消费。
+    const rp = toResponsesPayload(payload, model_name);
+    rp.stream = stream;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 300000); // 5 分钟超时
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${api_key}`,
+        },
+        body: JSON.stringify(rp),
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      if (!res.ok) {
+        const text = await res.text();
+        return {
+          ok: false,
+          status: res.status,
+          headers: res.headers,
+          error: `Provider [${provider_name}/${model_name}] returned ${res.status}: ${text.substring(0, 500)}`,
+          retryable: isRetryableError(res.status, null, text),
+        };
+      }
+      // 非流式直接取 usage（Responses 结构：usage.input_tokens/output_tokens）
+      // 流式由上层边读边解析 response.completed 事件里的 usage
+      const usage = stream ? null : await readJsonUsage(res);
+      return { ok: true, status: res.status, headers: res.headers, res, usage };
+    } catch (err) {
+      clearTimeout(timeout);
+      return {
+        ok: false,
+        status: 0,
+        error: `Provider [${provider_name}/${model_name}] network error: ${err.message}`,
+        retryable: true,
+      };
+    }
+  }
+
+  // ===== chat/completions 路径 =====
   payload.model = model_name;
   if (stream) payload.stream = true;
 
@@ -147,11 +273,14 @@ async function readJsonUsage(res) {
     const json = await res.clone().json();
     const u = json.usage;
     if (!u) return null;
-    const details = u.prompt_tokens_details || {};
+    // chat/completions 风格：prompt_tokens/completion_tokens；Responses 风格：input_tokens/output_tokens
+    const details = u.prompt_tokens_details || u.input_tokens_details || {};
+    const prompt_tokens = u.prompt_tokens ?? u.input_tokens ?? 0;
+    const completion_tokens = u.completion_tokens ?? u.output_tokens ?? 0;
     return {
-      prompt_tokens: u.prompt_tokens || 0,
-      completion_tokens: u.completion_tokens || 0,
-      total_tokens: u.total_tokens || (u.prompt_tokens || 0) + (u.completion_tokens || 0),
+      prompt_tokens,
+      completion_tokens,
+      total_tokens: u.total_tokens || prompt_tokens + completion_tokens,
       cached_tokens: details.cached_tokens || u.cached_tokens || 0,
     };
   } catch {
@@ -159,4 +288,4 @@ async function readJsonUsage(res) {
   }
 }
 
-module.exports = { callProvider, isRetryableError, readJsonUsage, buildChatUrl };
+module.exports = { callProvider, isRetryableError, readJsonUsage, buildUrl, buildChatUrl, toResponsesPayload };
