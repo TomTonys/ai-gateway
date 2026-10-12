@@ -1,7 +1,7 @@
 'use strict';
 
 const { CustomModelRepo, LogRepo } = require('./db');
-const { callProvider, readJsonUsage } = require('./providers/openai');
+const { callProvider, readJsonUsage, normalizeStreamUsage } = require('./providers/openai');
 
 /**
  * 网关核心：融合模型请求调度
@@ -170,7 +170,10 @@ async function pumpStreamWithUsage(res, target) {
         if (m) {
           try {
             const j = JSON.parse(m[1]);
+            // chat/completions 流：chunk 顶层带 usage
             if (j && j.usage && typeof j.usage === 'object') usage = j.usage;
+            // Responses API 流：response.completed 事件里 response.usage
+            if (j && j.type === 'response.completed' && j.response?.usage) usage = j.response.usage;
           } catch {}
         }
       }
@@ -180,14 +183,18 @@ async function pumpStreamWithUsage(res, target) {
   } finally {
     target.end();
   }
-  // 归一化 usage
+  // 归一化 usage：兼容 chat/completions（prompt_tokens/completion_tokens）
+  // 与 Responses API 事件流（input_tokens/output_tokens，在 response.completed
+  // 或带 usage 的 data 事件里）两种字段命名
   if (usage) {
-    const details = usage.prompt_tokens_details || {};
+    const details = usage.prompt_tokens_details || usage.input_tokens_details || {};
+    const prompt_tokens = usage.prompt_tokens ?? usage.input_tokens ?? 0;
+    const completion_tokens = usage.completion_tokens ?? usage.output_tokens ?? 0;
     return {
-      prompt_tokens: usage.prompt_tokens || 0,
-      completion_tokens: usage.completion_tokens || 0,
-      total_tokens: usage.total_tokens || 0,
-      cached_tokens: details.cached_tokens || 0,
+      prompt_tokens,
+      completion_tokens,
+      total_tokens: usage.total_tokens || prompt_tokens + completion_tokens,
+      cached_tokens: details.cached_tokens || usage.cached_tokens || 0,
     };
   }
   return null;
