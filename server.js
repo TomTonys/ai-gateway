@@ -27,6 +27,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 app.use(require('./src/routes/providers'));
 app.use(require('./src/routes/customModels'));
 app.use(require('./src/routes/gateway'));
+app.use(require('./src/routes/healthcheck'));
 
 // 健康检查
 app.get('/health', (req, res) => {
