@@ -42,13 +42,30 @@ function isRetryableError(status, err, body) {
 }
 
 /**
+ * 构造 chat completions 请求 URL。
+ *
+ * base_url 的语义是「填到版本号为止的完整前缀」，由各供应商自己决定，例如：
+ *   https://open.bigmodel.cn/api/paas/v4   （智谱，版本含在地址里）
+ *   https://token.sensenova.cn/v1           （Sensenova）
+ *   https://api.openai.com                  （OpenAI，不带版本号）
+ * 网关只在其后拼 /chat/completions，不猜测、不改写版本号——上游升到 v5/v6
+ * 时，只需改供应商配置里的 base_url，无需动代码。
+ *
+ * 已存在的 base_url 若已含 /v1（如 .../v1）也能直接工作，不做归一化。
+ */
+function buildChatUrl(base_url) {
+  const base = (base_url || '').trim().replace(/\/+$/, '');
+  return base + '/chat/completions';
+}
+
+/**
  * 向单个供应商模型发起请求。
  * @returns {Promise<{ok:boolean, status:number, body:ReadableStream|Buffer, json:object|null, error:string|null}>}
  */
 async function callProvider(member, { body, stream }) {
   const { base_url, api_key, model_name, provider_name } = member;
 
-  const url = base_url.replace(/\/+$/, '') + '/v1/chat/completions';
+  const url = buildChatUrl(base_url);
 
   // 替换请求体中的 model 为供应商侧真实模型名
   const payload = JSON.parse(body || '{}');
@@ -142,4 +159,4 @@ async function readJsonUsage(res) {
   }
 }
 
-module.exports = { callProvider, isRetryableError, readJsonUsage };
+module.exports = { callProvider, isRetryableError, readJsonUsage, buildChatUrl };
