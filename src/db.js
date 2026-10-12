@@ -159,7 +159,7 @@ const ModelRepo = {
     };
   },
 
-  create({ provider_id, model_name, display_name, remark }) {
+  create({ provider_id, model_name, display_name, remark, request_method }) {
     if (store.models.some(m => m.provider_id === Number(provider_id) && m.model_name === model_name)) {
       throw new Error(`Model "${model_name}" already exists for this provider`);
     }
@@ -169,6 +169,7 @@ const ModelRepo = {
       model_name,
       display_name: display_name || model_name,
       status: 'active',
+      request_method: request_method === 'responses' ? 'responses' : 'chat',
       remark: remark || '',
       created_at: now(),
       updated_at: now(),
@@ -190,6 +191,7 @@ const ModelRepo = {
       model_name: patch.model_name ?? m.model_name,
       display_name: patch.display_name ?? m.display_name,
       status: patch.status ?? m.status,
+      request_method: patch.request_method === undefined ? (m.request_method || 'chat') : patch.request_method,
       remark: patch.remark ?? m.remark,
       updated_at: now(),
     });
@@ -292,6 +294,7 @@ const CustomModelRepo = {
           model_name: m ? m.model_name : '(deleted)',
           display_name: m ? m.display_name : '(deleted)',
           model_status: m ? m.status : 'inactive',
+          request_method: m ? (m.request_method || 'chat') : 'chat',
           provider_id: p ? p.id : null,
           provider_name: p ? p.name : '(deleted)',
           base_url: p ? p.base_url : '',
