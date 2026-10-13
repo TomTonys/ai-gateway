@@ -118,6 +118,8 @@ function initDatabase() {
       total_tokens INTEGER NOT NULL DEFAULT 0,
       cached_tokens INTEGER NOT NULL DEFAULT 0,
       request_snapshot TEXT NOT NULL DEFAULT '',
+      request_body TEXT NOT NULL DEFAULT '',
+      response_body TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_logs_created ON logs(created_at);
@@ -136,6 +138,15 @@ function initDatabase() {
   `);
 
   const legacy = loadLegacyJson();
+
+  // 增量迁移：给已存在的旧库补列（SQLite 无 IF NOT EXISTS for ADD COLUMN）
+  const logCols = db.prepare('PRAGMA table_info(logs)').all().map(c => c.name);
+  if (!logCols.includes('request_body')) {
+    db.exec("ALTER TABLE logs ADD COLUMN request_body TEXT NOT NULL DEFAULT ''");
+  }
+  if (!logCols.includes('response_body')) {
+    db.exec("ALTER TABLE logs ADD COLUMN response_body TEXT NOT NULL DEFAULT ''");
+  }
 
   // 一次性迁移：旧 JSON 有数据且 SQLite 是空的 → 导入
   const hasRows = db.prepare(
@@ -511,10 +522,10 @@ const CustomModelRepo = {
 //  Request Logs
 // ============================================================
 const LogRepo = {
-  create({ custom_model, target_model, provider_name, status_code, success, duration_ms, error_message, usage, request_snapshot }) {
+  create({ custom_model, target_model, provider_name, status_code, success, duration_ms, error_message, usage, request_snapshot, request_body, response_body }) {
     const id = q.nextId('logs');
     db.prepare(
-      'INSERT INTO logs (id,custom_model,target_model,provider_name,status_code,success,duration_ms,error_message,prompt_tokens,completion_tokens,total_tokens,cached_tokens,request_snapshot,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
+      'INSERT INTO logs (id,custom_model,target_model,provider_name,status_code,success,duration_ms,error_message,prompt_tokens,completion_tokens,total_tokens,cached_tokens,request_snapshot,request_body,response_body,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
     ).run(
       id,
       custom_model || '',
@@ -529,10 +540,41 @@ const LogRepo = {
       usage ? (usage.total_tokens || 0) : 0,
       usage ? (usage.cached_tokens || 0) : 0,
       request_snapshot ? JSON.stringify(request_snapshot) : '',
+      request_body || '',
+      response_body || '',
       now(),
     );
     pruneLogs();
-    return this.list(1, 0)[0];
+    return this.get(id);
+  },
+
+  /** 单条日志完整详情（含请求体/响应体原文，供日志详情弹窗使用） */
+  get(id) {
+    const l = db.prepare('SELECT * FROM logs WHERE id=?').get(Number(id));
+    if (!l) return null;
+    return {
+      id: l.id,
+      custom_model: l.custom_model,
+      target_model: l.target_model,
+      provider_name: l.provider_name,
+      status_code: l.status_code,
+      success: l.success,
+      duration_ms: l.duration_ms,
+      error_message: l.error_message,
+      prompt_tokens: l.prompt_tokens,
+      completion_tokens: l.completion_tokens,
+      total_tokens: l.total_tokens,
+      cached_tokens: l.cached_tokens,
+      request_snapshot: l.request_snapshot ? JSON.parse(l.request_snapshot) : null,
+      request_body: l.request_body || '',
+      response_body: l.response_body || '',
+      created_at: l.created_at,
+    };
+  },
+
+  /** 更新指定日志的响应体（流式场景：透传完成后才能拿到完整响应） */
+  updateResponseBody(id, response_body) {
+    db.prepare('UPDATE logs SET response_body=? WHERE id=?').run(response_body || '', Number(id));
   },
 
   /** 更新最近一条日志的 usage（流式场景：透传完成后才拿到 usage） */
@@ -549,8 +591,9 @@ const LogRepo = {
     );
   },
 
+  /** 列表：不返回 request_body/response_body 大字段（体积控制），详情走 get(id) */
   list(limit = 50, offset = 0, filter = null) {
-    let sql = 'SELECT * FROM logs';
+    let sql = 'SELECT id,custom_model,target_model,provider_name,status_code,success,duration_ms,error_message,prompt_tokens,completion_tokens,total_tokens,cached_tokens,request_snapshot,created_at FROM logs';
     const params = [];
     if (filter !== null && filter !== undefined) {
       sql += ' WHERE success = ?';
