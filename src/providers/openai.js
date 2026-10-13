@@ -140,7 +140,12 @@ function toResponsesPayload(payload, model_name) {
 
 /**
  * 向单个供应商模型发起请求。
- * @returns {Promise<{ok:boolean, status:number, body:ReadableStream|Buffer, json:object|null, error:string|null}>}
+ *
+ * 返回值中除 ok/status/usage 外，额外携带：
+ *   - sent: 实际发送给上游的请求体对象（已替换 model、已转 Responses 格式、已清洗），
+ *           供网关写入日志详情（"接口请求详细情况"展示的就是这个）
+ *   - rawText: 非流式响应/错误响应的原始文本（供日志记录"输出详细情况"）
+ * @returns {Promise<{ok:boolean, status:number, res?:ReadableStream|Response, usage?:object|null, error?:string|null, retryable?:boolean, sent:object, rawText?:string}>}
  */
 async function callProvider(member, { body, stream }) {
   const { base_url, api_key, model_name, provider_name } = member;
@@ -177,12 +182,18 @@ async function callProvider(member, { body, stream }) {
           headers: res.headers,
           error: `Provider [${provider_name}/${model_name}] returned ${res.status}: ${text.substring(0, 500)}`,
           retryable: isRetryableError(res.status, null, text),
+          sent: rp,
+          rawText: text,
         };
       }
-      // 非流式直接取 usage（Responses 结构：usage.input_tokens/output_tokens）
-      // 流式由上层边读边解析 response.completed 事件里的 usage
-      const usage = stream ? null : await readJsonUsage(res);
-      return { ok: true, status: res.status, headers: res.headers, res, usage };
+      // 非流式：读原始文本（供日志记录完整输出），再从文本解析 usage
+      // 流式：保持 res 原样透传；usage 与响应体由上层在转发时边读边解析（见 gateway.js）
+      if (stream) {
+        return { ok: true, status: res.status, headers: res.headers, res, usage: null, sent: rp };
+      }
+      const rawText = await res.text();
+      const usage = extractUsageFromText(rawText);
+      return { ok: true, status: res.status, headers: res.headers, rawText, usage, sent: rp };
     } catch (err) {
       clearTimeout(timeout);
       return {
@@ -190,6 +201,7 @@ async function callProvider(member, { body, stream }) {
         status: 0,
         error: `Provider [${provider_name}/${model_name}] network error: ${err.message}`,
         retryable: true,
+        sent: rp,
       };
     }
   }
@@ -239,18 +251,25 @@ async function callProvider(member, { body, stream }) {
         headers: res.headers,
         error: `Provider [${provider_name}/${model_name}] returned ${res.status}: ${text.substring(0, 500)}`,
         retryable: isRetryableError(res.status, null, text),
+        sent: payload,
+        rawText: text,
       };
     }
 
-    // 非流式：直接读 JSON 拿到 usage（prompt/completion/cached）
+    // 非流式：读原始文本（供日志记录完整输出），再从文本解析 usage
     // 流式：保持 res 原样透传；usage 由上层在转发时边读边解析（见 gateway.js）
-    const usage = stream ? null : await readJsonUsage(res);
+    if (stream) {
+      return { ok: true, status: res.status, headers: res.headers, res, usage: null, sent: payload };
+    }
+    const rawText = await res.text();
+    const usage = extractUsageFromText(rawText);
     return {
       ok: true,
       status: res.status,
       headers: res.headers,
-      res,
+      rawText,
       usage,
+      sent: payload,
     };
   } catch (err) {
     clearTimeout(timeout);
@@ -259,33 +278,53 @@ async function callProvider(member, { body, stream }) {
       status: 0,
       error: `Provider [${provider_name}/${model_name}] network error: ${err.message}`,
       retryable: true,
+      sent: payload,
     };
   }
 }
 
 /**
- * 从非流式 JSON 响应里提取 usage。
- * 不同供应商 usage 字段略有差异，这里做归一化，缺省补 0。
- * @returns {{prompt_tokens:number, completion_tokens:number, total_tokens:number, prompt_tokens_details?:object, cached_tokens:number}|null}
+ * 从响应文本中解析 usage（供非流式路径使用，避免二次读取 body）。
+ * @returns {object|null} 归一化后的 usage
  */
-async function readJsonUsage(res) {
+function extractUsageFromText(text) {
   try {
-    const json = await res.clone().json();
-    const u = json.usage;
-    if (!u) return null;
-    // chat/completions 风格：prompt_tokens/completion_tokens；Responses 风格：input_tokens/output_tokens
-    const details = u.prompt_tokens_details || u.input_tokens_details || {};
-    const prompt_tokens = u.prompt_tokens ?? u.input_tokens ?? 0;
-    const completion_tokens = u.completion_tokens ?? u.output_tokens ?? 0;
-    return {
-      prompt_tokens,
-      completion_tokens,
-      total_tokens: u.total_tokens || prompt_tokens + completion_tokens,
-      cached_tokens: details.cached_tokens || u.cached_tokens || 0,
-    };
+    return normalizeUsage(JSON.parse(text).usage);
   } catch {
     return null;
   }
 }
 
-module.exports = { callProvider, isRetryableError, readJsonUsage, buildUrl, buildChatUrl, toResponsesPayload };
+/**
+ * 归一化 usage 字段。
+ * 兼容两种命名：chat/completions（prompt_tokens/completion_tokens）
+ * 与 Responses API（input_tokens/output_tokens）。
+ * @returns {object|null} 归一化后的 usage，缺省补 0
+ */
+function normalizeUsage(u) {
+  if (!u || typeof u !== 'object') return null;
+  const details = u.prompt_tokens_details || u.input_tokens_details || {};
+  const prompt_tokens = u.prompt_tokens ?? u.input_tokens ?? 0;
+  const completion_tokens = u.completion_tokens ?? u.output_tokens ?? 0;
+  return {
+    prompt_tokens,
+    completion_tokens,
+    total_tokens: u.total_tokens || prompt_tokens + completion_tokens,
+    cached_tokens: details.cached_tokens || u.cached_tokens || 0,
+  };
+}
+
+/**
+ * 从非流式 JSON 响应里提取 usage（保留给历史调用方；内部改用
+ * extractUsageFromText 以免重复读取 body）。
+ * @returns {Promise<object|null>}
+ */
+async function readJsonUsage(res) {
+  try {
+    return normalizeUsage((await res.clone().json()).usage);
+  } catch {
+    return null;
+  }
+}
+
+module.exports = { callProvider, isRetryableError, readJsonUsage, normalizeUsage, buildUrl, buildChatUrl, toResponsesPayload };
