@@ -1,64 +1,240 @@
 'use strict';
 
 /**
- * 持久化层 —— 纯 JS JSON 文件存储（零原生依赖）
+ * 持久化层 —— SQLite（better-sqlite3，同步 API，零原生异步开销）
  *
  * 设计:
- *  - 单一数据文件 data/gateway.json，原子写入（tmp + rename）
- *  - 进程内单线程内存缓存，所有读操作走内存
- *  - 日志有界（保留最近 500 条），防止文件无限膨胀
- *  - 保持与数据库版本完全相同的 Repository API
+ *  - data/gateway.db 单一 SQLite 文件，WAL 模式（崩溃安全、并发读）
+ *  - 启动时自动完成一次性 JSON→SQLite 迁移（旧 data/gateway.json），
+ *    迁移成功后写 .migrated 标记，旧 JSON 不再参与读写
+ *  - 路由层只依赖 Repository API（ProviderRepo / ModelRepo / ...），
+ *    存储介质对上层完全透明
  */
 
 const fs = require('fs');
 const path = require('path');
 
-const DATA_FILE = path.join(__dirname, '..', 'data', 'gateway.json');
+const DATA_DIR = path.join(__dirname, '..', 'data');
+const DB_FILE = path.join(DATA_DIR, 'gateway.db');
+const LEGACY_JSON = path.join(DATA_DIR, 'gateway.json');
+const MIGRATED_FLAG = path.join(DATA_DIR, '.migrated-sqlite');
 const LOG_CAP = 2000;
-
-function defaultData() {
-  return {
-    seq: { provider: 0, model: 0, custom_model: 0, member: 0, log: 0 },
-    providers: [],
-    models: [],
-    custom_models: [],
-    members: [],   // { id, custom_model_id, model_id, priority, enabled, created_at }
-    logs: [],
-  };
-}
-
-function load() {
-  try {
-    if (fs.existsSync(DATA_FILE)) {
-      const raw = fs.readFileSync(DATA_FILE, 'utf8');
-      const parsed = JSON.parse(raw);
-      return { ...defaultData(), ...parsed };
-    }
-  } catch (e) {
-    console.error('[db] Failed to load data file, starting fresh:', e.message);
-  }
-  return defaultData();
-}
-
-let store = load();
-const dir = path.dirname(DATA_FILE);
-if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-
-function persist() {
-  const tmp = DATA_FILE + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(store, null, 1));
-  fs.renameSync(tmp, DATA_FILE);
-}
 
 function now() {
   const d = new Date();
   const p = n => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${d.getDate()} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
-function nextId(key) {
-  store.seq[key] += 1;
-  return store.seq[key];
+function parseDateTime(s) {
+  if (!s) return 0;
+  const t = new Date(s.replace(' ', 'T')).getTime();
+  return Number.isNaN(t) ? 0 : t;
+}
+
+// ============================================================
+//  旧 JSON 结构（仅迁移用）
+// ============================================================
+function loadLegacyJson() {
+  try {
+    if (fs.existsSync(LEGACY_JSON)) {
+      return JSON.parse(fs.readFileSync(LEGACY_JSON, 'utf8'));
+    }
+  } catch (e) {
+    console.error('[db] 旧 JSON 读取失败（忽略，使用空模板）:', e.message);
+  }
+  return {
+    seq: { provider: 0, model: 0, custom_model: 0, member: 0, log: 0 },
+    providers: [], models: [], custom_models: [], members: [], logs: [],
+    test_results: {},
+  };
+}
+
+// ============================================================
+//  建表 + 迁移
+// ============================================================
+const Database = require('better-sqlite3');
+let db;
+
+function initDatabase() {
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+  db = new Database(DB_FILE);
+  db.pragma('journal_mode = WAL');
+  db.pragma('foreign_keys = ON');
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS providers (
+      id INTEGER PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      base_url TEXT NOT NULL DEFAULT '',
+      api_key TEXT NOT NULL DEFAULT '',
+      api_type TEXT NOT NULL DEFAULT 'openai',
+      status TEXT NOT NULL DEFAULT 'active',
+      remark TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS models (
+      id INTEGER PRIMARY KEY,
+      provider_id INTEGER NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+      model_name TEXT NOT NULL,
+      display_name TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'active',
+      request_method TEXT NOT NULL DEFAULT 'chat',
+      remark TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(provider_id, model_name)
+    );
+    CREATE TABLE IF NOT EXISTS custom_models (
+      id INTEGER PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      description TEXT NOT NULL DEFAULT '',
+      retry_mode TEXT NOT NULL DEFAULT 'priority',
+      status TEXT NOT NULL DEFAULT 'active',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS members (
+      id INTEGER PRIMARY KEY,
+      custom_model_id INTEGER NOT NULL REFERENCES custom_models(id) ON DELETE CASCADE,
+      model_id INTEGER NOT NULL REFERENCES models(id) ON DELETE CASCADE,
+      priority INTEGER NOT NULL DEFAULT 0,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL,
+      UNIQUE(custom_model_id, model_id)
+    );
+    CREATE TABLE IF NOT EXISTS logs (
+      id INTEGER PRIMARY KEY,
+      custom_model TEXT NOT NULL DEFAULT '',
+      target_model TEXT NOT NULL DEFAULT '',
+      provider_name TEXT NOT NULL DEFAULT '',
+      status_code INTEGER NOT NULL DEFAULT 0,
+      success INTEGER NOT NULL DEFAULT 0,
+      duration_ms INTEGER NOT NULL DEFAULT 0,
+      error_message TEXT NOT NULL DEFAULT '',
+      prompt_tokens INTEGER NOT NULL DEFAULT 0,
+      completion_tokens INTEGER NOT NULL DEFAULT 0,
+      total_tokens INTEGER NOT NULL DEFAULT 0,
+      cached_tokens INTEGER NOT NULL DEFAULT 0,
+      request_snapshot TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_logs_created ON logs(created_at);
+    CREATE TABLE IF NOT EXISTS test_results (
+      model_id INTEGER PRIMARY KEY REFERENCES models(id) ON DELETE CASCADE,
+      ok INTEGER NOT NULL DEFAULT 0,
+      duration_ms INTEGER NOT NULL DEFAULT 0,
+      status INTEGER NOT NULL DEFAULT 0,
+      error TEXT NOT NULL DEFAULT '',
+      tested_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS meta (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+  `);
+
+  const legacy = loadLegacyJson();
+
+  // 一次性迁移：旧 JSON 有数据且 SQLite 是空的 → 导入
+  const hasRows = db.prepare(
+    'SELECT (SELECT count(*) FROM providers)+(SELECT count(*) FROM models)+(SELECT count(*) FROM custom_models)+(SELECT count(*) FROM members)+(SELECT count(*) FROM logs) AS n'
+  ).get().n > 0;
+
+  if (!hasRows && fs.existsSync(LEGACY_JSON)) {
+    const t = db.transaction(() => {
+      const insProv = db.prepare(
+        'INSERT INTO providers (id,name,base_url,api_key,api_type,status,remark,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)');
+      for (const p of legacy.providers || []) {
+        insProv.run(p.id, p.name, p.base_url || '', p.api_key || '', p.api_type || 'openai',
+          p.status || 'active', p.remark || '', p.created_at || now(), p.updated_at || p.created_at || now());
+      }
+      const insModel = db.prepare(
+        'INSERT INTO models (id,provider_id,model_name,display_name,status,request_method,remark,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)');
+      for (const m of legacy.models || []) {
+        insModel.run(m.id, m.provider_id, m.model_name, m.display_name || m.model_name,
+          m.status || 'active', m.request_method || 'chat', m.remark || '',
+          m.created_at || now(), m.updated_at || m.created_at || now());
+      }
+      const insCustom = db.prepare(
+        'INSERT INTO custom_models (id,name,description,retry_mode,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)');
+      for (const c of legacy.custom_models || []) {
+        insCustom.run(c.id, c.name, c.description || '', c.retry_mode || 'priority',
+          c.status || 'active', c.created_at || now(), c.updated_at || c.created_at || now());
+      }
+      const insMember = db.prepare(
+        'INSERT INTO members (id,custom_model_id,model_id,priority,enabled,created_at) VALUES (?,?,?,?,?,?)');
+      for (const mm of legacy.members || []) {
+        insMember.run(mm.id, mm.custom_model_id, mm.model_id, mm.priority || 0,
+          mm.enabled === undefined ? 1 : (mm.enabled ? 1 : 0), mm.created_at || now());
+      }
+      const insLog = db.prepare(
+        'INSERT INTO logs (id,custom_model,target_model,provider_name,status_code,success,duration_ms,error_message,prompt_tokens,completion_tokens,total_tokens,cached_tokens,request_snapshot,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
+      for (const l of (legacy.logs || []).slice(0, LOG_CAP)) {
+        insLog.run(l.id, l.custom_model || '', l.target_model || '', l.provider_name || '',
+          l.status_code || 0, l.success ? 1 : 0, l.duration_ms || 0, l.error_message || '',
+          l.prompt_tokens || 0, l.completion_tokens || 0, l.total_tokens || 0, l.cached_tokens || 0,
+          l.request_snapshot ? JSON.stringify(l.request_snapshot) : '', l.created_at || now());
+      }
+      const insTest = db.prepare(
+        'INSERT INTO test_results (model_id,ok,duration_ms,status,error,tested_at) VALUES (?,?,?,?,?,?)');
+      for (const tr of Object.values(legacy.test_results || {})) {
+        insTest.run(tr.model_id, tr.ok ? 1 : 0, tr.duration_ms || 0, tr.status || 0,
+          tr.error || '', tr.tested_at || now());
+      }
+      // 元数据（seq 与旧版兼容保留）
+      const insMeta = db.prepare('INSERT OR REPLACE INTO meta (key,value) VALUES (?,?)');
+      for (const [k, v] of Object.entries(legacy.seq || {})) insMeta.run('seq_' + k, String(v));
+      insMeta.run('migrated_from', new Date().toISOString());
+    });
+    t();
+    fs.writeFileSync(MIGRATED_FLAG, JSON.stringify({ at: new Date().toISOString(), legacy: 'data/gateway.json' }, null, 2));
+    console.log('[db] 已将旧 JSON 数据迁移到 SQLite（data/gateway.db）');
+  }
+}
+
+initDatabase();
+
+// ============================================================
+//  通用取数助手
+// ============================================================
+const q = {
+  providers: () => db.prepare('SELECT * FROM providers ORDER BY id').all()
+    .map(p => ({
+      ...p,
+      model_count: db.prepare('SELECT count(*) n FROM models WHERE provider_id=?').get(p.id).n,
+    })),
+  models: () => db.prepare('SELECT * FROM models ORDER BY id').all(),
+  customModels: () => db.prepare('SELECT * FROM custom_models ORDER BY id').all(),
+  members: () => db.prepare('SELECT * FROM members ORDER BY id').all(),
+  logsDesc: () => db.prepare('SELECT * FROM logs ORDER BY id DESC').all()
+    .map(l => ({
+      id: l.id,
+      custom_model: l.custom_model,
+      target_model: l.target_model,
+      provider_name: l.provider_name,
+      status_code: l.status_code,
+      success: l.success,
+      duration_ms: l.duration_ms,
+      error_message: l.error_message,
+      prompt_tokens: l.prompt_tokens,
+      completion_tokens: l.completion_tokens,
+      total_tokens: l.total_tokens,
+      cached_tokens: l.cached_tokens,
+      request_snapshot: l.request_snapshot ? JSON.parse(l.request_snapshot) : null,
+      created_at: l.created_at,
+    })),
+  nextId: (table) =>
+    Number(db.prepare('SELECT COALESCE(MAX(id),0)+1 AS n FROM ' + table).get().n),
+};
+
+// 日志保持有界（与旧版 LOG_CAP 一致）
+function pruneLogs() {
+  const excess = db.prepare('SELECT count(*) n FROM logs').get().n - LOG_CAP;
+  if (excess > 0) {
+    db.prepare('DELETE FROM logs WHERE id IN (SELECT id FROM logs ORDER BY id DESC LIMIT ?)').run(excess);
+  }
 }
 
 // ============================================================
@@ -66,70 +242,60 @@ function nextId(key) {
 // ============================================================
 const ProviderRepo = {
   list() {
-    return store.providers.map(p => ({
-      ...p,
-      model_count: store.models.filter(m => m.provider_id === p.id).length,
-    }));
+    return q.providers().reverse();
   },
 
   get(id) {
-    return store.providers.find(p => p.id === Number(id)) || null;
+    const p = db.prepare('SELECT * FROM providers WHERE id=?').get(Number(id));
+    if (!p) return null;
+    p.model_count = db.prepare('SELECT count(*) n FROM models WHERE provider_id=?').get(p.id).n;
+    return p;
   },
 
   create({ name, base_url, api_key, api_type, remark, status }) {
-    if (store.providers.some(p => p.name === name)) {
+    if (db.prepare('SELECT 1 FROM providers WHERE name=?').get(name)) {
       throw new Error(`Provider name "${name}" already exists`);
     }
-    const p = {
-      id: nextId('provider'),
-      name,
-      base_url,
-      api_key: api_key || '',
-      api_type: api_type || 'openai',
-      status: status || 'active',
-      remark: remark || '',
-      created_at: now(),
-      updated_at: now(),
-    };
-    store.providers.push(p);
-    persist();
-    return p;
+    const id = q.nextId('providers');
+    const ts = now();
+    db.prepare(
+      'INSERT INTO providers (id,name,base_url,api_key,api_type,status,remark,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)'
+    ).run(id, name, base_url || '', api_key || '', api_type || 'openai', status || 'active', remark || '', ts, ts);
+    return this.get(id);
   },
 
   update(id, patch) {
     const p = this.get(id);
     if (!p) return false;
     if (patch.name && patch.name !== p.name) {
-      if (store.providers.some(x => x.name === patch.name)) {
+      if (db.prepare('SELECT 1 FROM providers WHERE name=? AND id!=?').get(patch.name, Number(id))) {
         throw new Error(`Provider name "${patch.name}" already exists`);
       }
     }
-    Object.assign(p, {
-      name: patch.name ?? p.name,
-      base_url: patch.base_url ?? p.base_url,
-      api_key: patch.api_key ?? p.api_key,
-      api_type: patch.api_type ?? p.api_type,
-      status: patch.status ?? p.status,
-      remark: patch.remark ?? p.remark,
-      updated_at: now(),
-    });
-    persist();
+    db.prepare(
+      'UPDATE providers SET name=?, base_url=?, api_key=?, api_type=?, status=?, remark=?, updated_at=? WHERE id=?'
+    ).run(
+      patch.name ?? p.name,
+      patch.base_url ?? p.base_url,
+      patch.api_key ?? p.api_key,
+      patch.api_type ?? p.api_type,
+      patch.status ?? p.status,
+      patch.remark ?? p.remark,
+      now(),
+      Number(id),
+    );
     return true;
   },
 
   delete(id) {
-    const before = store.providers.length;
-    const target = store.providers.find(p => p.id === Number(id));
-    if (!target) return false;
-    store.providers = store.providers.filter(p => p.id !== Number(id));
-    // 级联删除其模型 + 相关融合成员
-    const deadModelIds = new Set(store.models.filter(m => m.provider_id === target.id).map(m => m.id));
-    store.models = store.models.filter(m => !deadModelIds.has(m.id));
-    store.members = store.members.filter(mm => !deadModelIds.has(mm.model_id));
-    store.logs = store.logs.filter(l => l.provider_name !== target.name);
-    if (store.providers.length === before - 1) persist();
+    const n = db.prepare('SELECT 1 FROM providers WHERE id=?').get(Number(id));
+    if (!n) return false;
+    const p = db.prepare('SELECT name FROM providers WHERE id=?').get(Number(id));
+    // CASCADE 自动清理该供应商的 models 与 members；历史日志按旧版行为清理
+    db.prepare('DELETE FROM providers WHERE id=?').run(Number(id));
+    db.prepare('DELETE FROM logs WHERE provider_name=?').run(p ? p.name : '');
     return true;
-  }
+  },
 };
 
 // ============================================================
@@ -137,19 +303,22 @@ const ProviderRepo = {
 // ============================================================
 const ModelRepo = {
   list(providerId) {
-    const rows = providerId
-      ? store.models.filter(m => m.provider_id === Number(providerId))
-      : store.models;
+    let rows;
+    if (providerId) {
+      rows = db.prepare('SELECT * FROM models WHERE provider_id=? ORDER BY id DESC').all(Number(providerId));
+    } else {
+      rows = db.prepare('SELECT * FROM models ORDER BY id DESC').all();
+    }
     return rows.map(m => {
-      const p = store.providers.find(x => x.id === m.provider_id);
+      const p = db.prepare('SELECT name FROM providers WHERE id=?').get(m.provider_id);
       return { ...m, provider_name: p ? p.name : '(deleted)' };
-    }).reverse();
+    });
   },
 
   get(id) {
-    const m = store.models.find(x => x.id === Number(id));
+    const m = db.prepare('SELECT * FROM models WHERE id=?').get(Number(id));
     if (!m) return null;
-    const p = store.providers.find(x => x.id === m.provider_id);
+    const p = db.prepare('SELECT * FROM providers WHERE id=?').get(m.provider_id);
     return {
       ...m,
       provider_name: p ? p.name : '(deleted)',
@@ -160,53 +329,49 @@ const ModelRepo = {
   },
 
   create({ provider_id, model_name, display_name, remark, request_method }) {
-    if (store.models.some(m => m.provider_id === Number(provider_id) && m.model_name === model_name)) {
-      throw new Error(`Model "${model_name}" already exists for this provider`);
+    const clash = db.prepare(
+      'SELECT 1 FROM models WHERE provider_id=? AND model_name=?').get(Number(provider_id), model_name);
+    if (clash) throw new Error(`Model "${model_name}" already exists for this provider`);
+    if (!db.prepare('SELECT 1 FROM providers WHERE id=?').get(Number(provider_id))) {
+      throw new Error('Provider not found');
     }
-    const m = {
-      id: nextId('model'),
-      provider_id: Number(provider_id),
-      model_name,
-      display_name: display_name || model_name,
-      status: 'active',
-      request_method: request_method === 'responses' ? 'responses' : 'chat',
-      remark: remark || '',
-      created_at: now(),
-      updated_at: now(),
-    };
-    store.models.push(m);
-    persist();
-    return m;
+    const id = q.nextId('models');
+    const ts = now();
+    db.prepare(
+      'INSERT INTO models (id,provider_id,model_name,display_name,status,request_method,remark,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)'
+    ).run(id, Number(provider_id), model_name, display_name || model_name, 'active',
+      request_method === 'responses' ? 'responses' : 'chat', remark || '', ts, ts);
+    return this.get(id);
   },
 
   update(id, patch) {
-    const m = store.models.find(x => x.id === Number(id));
+    const m = db.prepare('SELECT * FROM models WHERE id=?').get(Number(id));
     if (!m) return false;
     if (patch.model_name && patch.model_name !== m.model_name) {
-      const clash = store.models.some(x =>
-        x.id !== m.id && x.provider_id === m.provider_id && x.model_name === patch.model_name);
+      const clash = db.prepare(
+        'SELECT 1 FROM models WHERE provider_id=? AND model_name=? AND id!=?').get(m.provider_id, patch.model_name, Number(id));
       if (clash) throw new Error(`Model "${patch.model_name}" already exists for this provider`);
     }
-    Object.assign(m, {
-      model_name: patch.model_name ?? m.model_name,
-      display_name: patch.display_name ?? m.display_name,
-      status: patch.status ?? m.status,
-      request_method: patch.request_method === undefined ? (m.request_method || 'chat') : patch.request_method,
-      remark: patch.remark ?? m.remark,
-      updated_at: now(),
-    });
-    persist();
+    db.prepare(
+      'UPDATE models SET model_name=?, display_name=?, status=?, request_method=?, remark=?, updated_at=? WHERE id=?'
+    ).run(
+      patch.model_name ?? m.model_name,
+      patch.display_name ?? m.display_name,
+      patch.status ?? m.status,
+      patch.request_method === undefined ? (m.request_method || 'chat') : patch.request_method,
+      patch.remark ?? m.remark,
+      now(),
+      Number(id),
+    );
     return true;
   },
 
   delete(id) {
-    const target = store.models.find(m => m.id === Number(id));
-    if (!target) return false;
-    store.models = store.models.filter(m => m.id !== Number(id));
-    store.members = store.members.filter(mm => mm.model_id !== Number(id));
-    persist();
+    const n = db.prepare('SELECT 1 FROM models WHERE id=?').get(Number(id));
+    if (!n) return false;
+    db.prepare('DELETE FROM models WHERE id=?').run(Number(id)); // CASCADE 清 members/test_results
     return true;
-  }
+  },
 };
 
 // ============================================================
@@ -214,78 +379,80 @@ const ModelRepo = {
 // ============================================================
 const CustomModelRepo = {
   list() {
-    return store.custom_models.map(cm => ({
-      ...cm,
-      member_count: store.members.filter(mm => mm.custom_model_id === cm.id).length,
-    })).reverse();
+    return db.prepare('SELECT * FROM custom_models ORDER BY id DESC').all()
+      .map(cm => ({
+        ...cm,
+        member_count: db.prepare('SELECT count(*) n FROM members WHERE custom_model_id=?').get(cm.id).n,
+      }));
   },
 
   get(id) {
-    return store.custom_models.find(cm => cm.id === Number(id)) || null;
+    return db.prepare('SELECT * FROM custom_models WHERE id=?').get(Number(id)) || null;
   },
 
   getByName(name) {
-    return store.custom_models.find(cm => cm.name === name && cm.status === 'active') || null;
+    return db.prepare("SELECT * FROM custom_models WHERE name=? AND status='active'").get(name) || null;
   },
 
   create({ name, description, retry_mode, status }) {
-    if (store.custom_models.some(cm => cm.name === name)) {
+    if (db.prepare('SELECT 1 FROM custom_models WHERE name=?').get(name)) {
       throw new Error(`Custom model name "${name}" already exists`);
     }
-    const cm = {
-      id: nextId('custom_model'),
-      name,
-      description: description || '',
-      retry_mode: retry_mode || 'priority',
-      status: status || 'active',
-      created_at: now(),
-      updated_at: now(),
-    };
-    store.custom_models.push(cm);
-    persist();
-    return cm;
+    const id = q.nextId('custom_models');
+    const ts = now();
+    db.prepare(
+      'INSERT INTO custom_models (id,name,description,retry_mode,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)'
+    ).run(id, name, description || '', retry_mode || 'priority', status || 'active', ts, ts);
+    return this.get(id);
   },
 
   update(id, patch) {
     const cm = this.get(id);
     if (!cm) return false;
     if (patch.name && patch.name !== cm.name) {
-      if (store.custom_models.some(x => x.name === patch.name)) {
+      if (db.prepare('SELECT 1 FROM custom_models WHERE name=? AND id!=?').get(patch.name, Number(id))) {
         throw new Error(`Custom model name "${patch.name}" already exists`);
       }
     }
-    Object.assign(cm, {
-      name: patch.name ?? cm.name,
-      description: patch.description ?? cm.description,
-      retry_mode: patch.retry_mode ?? cm.retry_mode,
-      status: patch.status ?? cm.status,
-      updated_at: now(),
-    });
-    persist();
+    db.prepare(
+      'UPDATE custom_models SET name=?, description=?, retry_mode=?, status=?, updated_at=? WHERE id=?'
+    ).run(
+      patch.name ?? cm.name,
+      patch.description ?? cm.description,
+      patch.retry_mode ?? cm.retry_mode,
+      patch.status ?? cm.status,
+      now(),
+      Number(id),
+    );
     return true;
   },
 
   delete(id) {
-    const target = store.custom_models.find(cm => cm.id === Number(id));
-    if (!target) return false;
-    store.custom_models = store.custom_models.filter(cm => cm.id !== Number(id));
-    store.members = store.members.filter(mm => mm.custom_model_id !== Number(id));
-    persist();
+    const n = db.prepare('SELECT 1 FROM custom_models WHERE id=?').get(Number(id));
+    if (!n) return false;
+    db.prepare('DELETE FROM custom_models WHERE id=?').run(Number(id)); // CASCADE 清 members
     return true;
   },
 
   /**
    * 获取融合模型成员（含模型 + 供应商联查信息）
    * retry_mode=priority: 按 priority 升序
-   * retry_mode=sequence: 按添加顺序（created_at / id）
+   * retry_mode=sequence: 按添加顺序（id 升序）
    */
   getMembers(customModelId) {
     const cm = this.get(customModelId);
-    const members = store.members
-      .filter(mm => mm.custom_model_id === Number(customModelId))
+    let rows;
+    if (cm && cm.retry_mode === 'sequence') {
+      rows = db.prepare(
+        'SELECT * FROM members WHERE custom_model_id=? ORDER BY id ASC').all(Number(customModelId));
+    } else {
+      rows = db.prepare(
+        'SELECT * FROM members WHERE custom_model_id=? ORDER BY priority ASC, id ASC').all(Number(customModelId));
+    }
+    return rows
       .map(mm => {
-        const m = store.models.find(x => x.id === mm.model_id);
-        const p = m ? store.providers.find(x => x.id === m.provider_id) : null;
+        const m = db.prepare('SELECT * FROM models WHERE id=?').get(mm.model_id);
+        const p = m ? db.prepare('SELECT * FROM providers WHERE id=?').get(m.provider_id) : null;
         return {
           member_id: mm.id,
           priority: mm.priority,
@@ -304,52 +471,40 @@ const CustomModelRepo = {
         };
       })
       .filter(m => m.provider_id); // 供应商已删除的成员剔除
-
-    if (cm && cm.retry_mode === 'sequence') {
-      members.sort((a, b) => a.member_id - b.member_id);
-    } else {
-      members.sort((a, b) => (a.priority - b.priority) || (a.member_id - b.member_id));
-    }
-    return members;
   },
 
   addMember({ custom_model_id, model_id, priority }) {
     const cm = this.get(custom_model_id);
     if (!cm) throw new Error('Custom model not found');
-    if (!store.models.some(m => m.id === Number(model_id))) throw new Error('Model not found');
-    const existing = store.members.find(mm => mm.custom_model_id === Number(custom_model_id) && mm.model_id === Number(model_id));
+    if (!db.prepare('SELECT 1 FROM models WHERE id=?').get(Number(model_id))) throw new Error('Model not found');
+    const existing = db.prepare(
+      'SELECT * FROM members WHERE custom_model_id=? AND model_id=?').get(Number(custom_model_id), Number(model_id));
     if (existing) {
-      existing.priority = Number(priority ?? existing.priority);
-      existing.enabled = 1;
+      db.prepare('UPDATE members SET priority=?, enabled=1 WHERE id=?')
+        .run(Number(priority ?? existing.priority), existing.id);
     } else {
-      store.members.push({
-        id: nextId('member'),
-        custom_model_id: Number(custom_model_id),
-        model_id: Number(model_id),
-        priority: Number(priority ?? 0),
-        enabled: 1,
-        created_at: now(),
-      });
+      db.prepare('INSERT INTO members (id,custom_model_id,model_id,priority,enabled,created_at) VALUES (?,?,?,?,?,?)')
+        .run(q.nextId('members'), Number(custom_model_id), Number(model_id),
+          Number(priority ?? 0), 1, now());
     }
-    persist();
   },
 
   updateMember(memberId, patch) {
-    const mm = store.members.find(x => x.id === Number(memberId));
+    const mm = db.prepare('SELECT * FROM members WHERE id=?').get(Number(memberId));
     if (!mm) return false;
-    if (patch.priority !== undefined) mm.priority = Number(patch.priority);
-    if (patch.enabled !== undefined) mm.enabled = Number(patch.enabled);
-    persist();
+    db.prepare('UPDATE members SET priority=?, enabled=? WHERE id=?')
+      .run(
+        patch.priority === undefined ? mm.priority : Number(patch.priority),
+        patch.enabled === undefined ? mm.enabled : (patch.enabled ? 1 : 0),
+        mm.id,
+      );
     return true;
   },
 
   removeMember(memberId) {
-    const target = store.members.find(mm => mm.id === Number(memberId));
-    if (!target) return false;
-    store.members = store.members.filter(mm => mm.id !== Number(memberId));
-    persist();
-    return true;
-  }
+    const n = db.prepare('DELETE FROM members WHERE id=?').run(Number(memberId));
+    return n.changes > 0;
+  },
 };
 
 // ============================================================
@@ -357,55 +512,85 @@ const CustomModelRepo = {
 // ============================================================
 const LogRepo = {
   create({ custom_model, target_model, provider_name, status_code, success, duration_ms, error_message, usage, request_snapshot }) {
-    store.logs.unshift({
-      id: nextId('log'),
-      custom_model: custom_model || '',
-      target_model: target_model || '',
-      provider_name: provider_name || '',
-      status_code: status_code || 0,
-      success: success ? 1 : 0,
-      duration_ms: duration_ms || 0,
-      error_message: error_message || '',
-      prompt_tokens: usage ? (usage.prompt_tokens || 0) : 0,
-      completion_tokens: usage ? (usage.completion_tokens || 0) : 0,
-      total_tokens: usage ? (usage.total_tokens || 0) : 0,
-      cached_tokens: usage ? (usage.cached_tokens || 0) : 0,
-      request_snapshot: request_snapshot || null,
-      created_at: now(),
-    });
-    if (store.logs.length > LOG_CAP) store.logs.length = LOG_CAP;
-    persist();
-    return store.logs[0];
+    const id = q.nextId('logs');
+    db.prepare(
+      'INSERT INTO logs (id,custom_model,target_model,provider_name,status_code,success,duration_ms,error_message,prompt_tokens,completion_tokens,total_tokens,cached_tokens,request_snapshot,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
+    ).run(
+      id,
+      custom_model || '',
+      target_model || '',
+      provider_name || '',
+      status_code || 0,
+      success ? 1 : 0,
+      duration_ms || 0,
+      error_message || '',
+      usage ? (usage.prompt_tokens || 0) : 0,
+      usage ? (usage.completion_tokens || 0) : 0,
+      usage ? (usage.total_tokens || 0) : 0,
+      usage ? (usage.cached_tokens || 0) : 0,
+      request_snapshot ? JSON.stringify(request_snapshot) : '',
+      now(),
+    );
+    pruneLogs();
+    return this.list(1, 0)[0];
   },
 
   /** 更新最近一条日志的 usage（流式场景：透传完成后才拿到 usage） */
   updateLastUsage({ prompt_tokens, completion_tokens, total_tokens, cached_tokens }) {
-    const log = store.logs[0];
-    if (!log) return;
-    log.prompt_tokens = prompt_tokens || 0;
-    log.completion_tokens = completion_tokens || 0;
-    log.total_tokens = total_tokens || 0;
-    log.cached_tokens = cached_tokens || 0;
-    persist();
+    const row = db.prepare('SELECT id FROM logs ORDER BY id DESC LIMIT 1').get();
+    if (!row) return;
+    db.prepare(
+      'UPDATE logs SET prompt_tokens=?, completion_tokens=?, total_tokens=?, cached_tokens=? WHERE id=?'
+    ).run(
+      prompt_tokens || 0, completion_tokens || 0,
+      total_tokens || (prompt_tokens || 0) + (completion_tokens || 0),
+      cached_tokens || 0,
+      row.id,
+    );
   },
 
   list(limit = 50, offset = 0, filter = null) {
-    let rows = store.logs;
-    if (filter !== null) {
-      rows = rows.filter(l => (filter === '1' ? l.success === 1 : l.success === 0));
+    let sql = 'SELECT * FROM logs';
+    const params = [];
+    if (filter !== null && filter !== undefined) {
+      sql += ' WHERE success = ?';
+      params.push(filter === '1' ? 1 : 0);
     }
-    return rows.slice(offset, offset + limit);
+    sql += ' ORDER BY id DESC LIMIT ? OFFSET ?';
+    params.push(Number(limit), Number(offset));
+    return db.prepare(sql).all(...params)
+      .map(l => ({
+        id: l.id,
+        custom_model: l.custom_model,
+        target_model: l.target_model,
+        provider_name: l.provider_name,
+        status_code: l.status_code,
+        success: l.success,
+        duration_ms: l.duration_ms,
+        error_message: l.error_message,
+        prompt_tokens: l.prompt_tokens,
+        completion_tokens: l.completion_tokens,
+        total_tokens: l.total_tokens,
+        cached_tokens: l.cached_tokens,
+        request_snapshot: l.request_snapshot ? JSON.parse(l.request_snapshot) : null,
+        created_at: l.created_at,
+      }));
   },
 
   count(filter = null) {
-    if (filter === null) return store.logs.length;
-    return store.logs.filter(l => (filter === '1' ? l.success === 1 : l.success === 0)).length;
+    let sql = 'SELECT count(*) n FROM logs';
+    const params = [];
+    if (filter !== null && filter !== undefined) {
+      sql += ' WHERE success = ?';
+      params.push(filter === '1' ? 1 : 0);
+    }
+    return db.prepare(sql).get(...params).n;
   },
 
   stats() {
-    const total = store.logs.length;
-    const success = store.logs.filter(l => l.success === 1).length;
-    return { total, success, failed: total - success };
+    const { total, success } = db.prepare(
+      'SELECT count(*) total, sum(CASE WHEN success=1 THEN 1 ELSE 0 END) success FROM logs').get();
+    return { total: total || 0, success: success || 0, failed: (total || 0) - (success || 0) };
   },
 
   /**
@@ -413,71 +598,64 @@ const LogRepo = {
    * @param {number} [days] 时间窗口（天），默认全部
    */
   tokenStats(days = 0) {
-    const logs = store.logs;
-    const since = days > 0 ? Date.now() - days * 86400000 : 0;
-    const rows = logs.filter(l => l.success === 1 && (!since || parseDateTime(l.created_at) >= since));
+    const rows = q.logsDesc().filter(l => l.success === 1)
+      .filter(l => days <= 0 || parseDateTime(l.created_at) >= Date.now() - days * 86400000);
     const sum = { prompt: 0, completion: 0, total: 0, cached: 0, requests: rows.length };
     const byModel = {};
     const byProvider = {};
     for (const l of rows) {
-      sum.prompt += l.prompt_tokens || 0;
-      sum.completion += l.completion_tokens || 0;
-      sum.total += l.total_tokens || 0;
-      sum.cached += l.cached_tokens || 0;
+      sum.prompt += l.prompt_tokens;
+      sum.completion += l.completion_tokens;
+      sum.total += l.total_tokens;
+      sum.cached += l.cached_tokens;
       const mk = l.target_model || '(unknown)';
       byModel[mk] = byModel[mk] || { requests: 0, prompt: 0, completion: 0, total: 0, cached: 0 };
       byModel[mk].requests += 1;
-      byModel[mk].prompt += l.prompt_tokens || 0;
-      byModel[mk].completion += l.completion_tokens || 0;
-      byModel[mk].total += l.total_tokens || 0;
-      byModel[mk].cached += l.cached_tokens || 0;
+      byModel[mk].prompt += l.prompt_tokens;
+      byModel[mk].completion += l.completion_tokens;
+      byModel[mk].total += l.total_tokens;
+      byModel[mk].cached += l.cached_tokens;
       const pk = l.provider_name || '(unknown)';
       byProvider[pk] = byProvider[pk] || { requests: 0, prompt: 0, completion: 0, total: 0, cached: 0 };
       byProvider[pk].requests += 1;
-      byProvider[pk].prompt += l.prompt_tokens || 0;
-      byProvider[pk].completion += l.completion_tokens || 0;
-      byProvider[pk].total += l.total_tokens || 0;
-      byProvider[pk].cached += l.cached_tokens || 0;
+      byProvider[pk].prompt += l.prompt_tokens;
+      byProvider[pk].completion += l.completion_tokens;
+      byProvider[pk].total += l.total_tokens;
+      byProvider[pk].cached += l.cached_tokens;
     }
     return { total: sum, by_model: byModel, by_provider: byProvider, window_days: days };
-  }
+  },
 };
-
-function parseDateTime(s) {
-  // "YYYY-MM-DD HH:mm:ss" -> 毫秒时间戳（本地时区）
-  if (!s) return 0;
-  const t = new Date(s.replace(' ', 'T')).getTime();
-  return Number.isNaN(t) ? 0 : t;
-}
 
 // ============================================================
 //  Model Connectivity Test Results
-//  按 model_id 存储最近一次连通性测试结果
 // ============================================================
 const TestResultRepo = {
   all() {
-    return store.test_results || {};
+    const out = {};
+    for (const t of db.prepare('SELECT * FROM test_results').all()) {
+      out[t.model_id] = {
+        model_id: t.model_id,
+        ok: t.ok,
+        duration_ms: t.duration_ms,
+        status: t.status,
+        error: t.error,
+        tested_at: t.tested_at,
+      };
+    }
+    return out;
   },
   get(modelId) {
-    return (store.test_results || {})[Number(modelId)] || null;
+    return this.all()[Number(modelId)] || null;
   },
   set(modelId, { duration_ms, ok, status, error }) {
-    if (!store.test_results) store.test_results = {};
-    store.test_results[Number(modelId)] = {
-      model_id: Number(modelId),
-      ok: ok ? 1 : 0,
-      duration_ms: duration_ms || 0,
-      status: status || 0,
-      error: error || '',
-      tested_at: now(),
-    };
-    persist();
+    db.prepare(
+      'INSERT INTO test_results (model_id,ok,duration_ms,status,error,tested_at) VALUES (?,?,?,?,?,?) ' +
+      'ON CONFLICT(model_id) DO UPDATE SET ok=excluded.ok, duration_ms=excluded.duration_ms, status=excluded.status, error=excluded.error, tested_at=excluded.tested_at'
+    ).run(Number(modelId), ok ? 1 : 0, duration_ms || 0, status || 0, error || '', now());
   },
   remove(modelId) {
-    if (store.test_results && store.test_results[Number(modelId)]) {
-      delete store.test_results[Number(modelId)];
-      persist();
-    }
+    db.prepare('DELETE FROM test_results WHERE model_id=?').run(Number(modelId));
   },
 };
 
