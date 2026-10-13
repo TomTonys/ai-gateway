@@ -16,11 +16,45 @@ const { callProvider, readJsonUsage, normalizeStreamUsage } = require('./provide
  *  4. 所有成员都失败 -> 返回 502 聚合错误
  */
 
+/**
+ * 请求快照：记录请求的特征指纹（不记录完整内容，避免隐私/体积），
+ * 用于事后排查"是哪个请求特征触发了 400"。
+ */
+function buildRequestSnapshot(parsed) {
+  const messages = Array.isArray(parsed.messages) ? parsed.messages : [];
+  let imageCount = 0;
+  let contentArrayCount = 0;
+  let emptyContentCount = 0;
+  for (const m of messages) {
+    const c = m && m.content;
+    if (Array.isArray(c)) {
+      contentArrayCount++;
+      for (const part of c) {
+        if (part && part.type === 'image_url') imageCount++;
+      }
+      if (c.length === 0) emptyContentCount++;
+    } else if (typeof c === 'string' && c.length === 0) {
+      emptyContentCount++;
+    }
+  }
+  return {
+    stream: parsed.stream === true,
+    msg_count: messages.length,
+    image_count: imageCount,
+    content_array_count: contentArrayCount,
+    empty_content_count: emptyContentCount,
+    // 客户端传的额外参数（常见"不认识"的参数是 400 的主要来源）
+    extra_params: Object.keys(parsed).filter(k =>
+      !['model', 'messages', 'stream'].includes(k)),
+  };
+}
+
 async function handleChatCompletion(req, res) {
   const requestBody = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
   const parsed = JSON.parse(requestBody || '{}');
   const requestedModel = parsed.model;
   const stream = parsed.stream === true;
+  const snapshot = buildRequestSnapshot(parsed);
 
   // 查找融合模型
   const customModel = CustomModelRepo.getByName(requestedModel);
@@ -73,6 +107,7 @@ async function handleChatCompletion(req, res) {
         success: true,
         duration_ms: duration,
         error_message: '',
+        request_snapshot: snapshot,
       });
 
       if (stream && result.res) {
@@ -109,6 +144,7 @@ async function handleChatCompletion(req, res) {
       success: false,
       duration_ms: duration,
       error_message: result.error || '',
+      request_snapshot: snapshot,
     });
 
     // 不可重试的错误（如 400 参数错误）—— 直接返回，不尝试后续成员
