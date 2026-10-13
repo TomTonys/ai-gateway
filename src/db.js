@@ -53,12 +53,84 @@ function loadLegacyJson() {
 // ============================================================
 //  建表 + 迁移
 // ============================================================
-const Database = require('better-sqlite3');
+/** 按 Node ABI 存放原生模块的目录（各环境各自编译，互不覆盖） */
+const NATIVE_DIR = path.join(__dirname, '..', '.native');
+
+/**
+ * 解析本机可用的 better-sqlite3 原生二进制。
+ *
+ * 背景：原生模块的 .node 文件与 Node ABI 版本（process.versions.modules）
+ * 强绑定。本项目的 node_modules 可能被多个不同 Node 版本的环境共享
+ * （例如宿主机 systemd 跑 Node 18、容器里跑 Node 24）。此时 node_modules
+ * 里只有一份二进制，"谁最后 rebuild 谁赢"，另一边加载会失败甚至段错误。
+ *
+ * 解决办法：每个环境用 native-build.sh 为**自己的** Node 版本编译一次，
+ * 产物按 ABI 命名存放在 .native/ 下。启动时按当前 ABI 精确选取，
+ * 多个环境即可共存、互不干扰。
+ *
+ * @returns {string|null} 匹配当前 ABI 的 .node 路径；null 表示退回默认查找
+ */
+function resolveNativeBinding() {
+  const abi = process.versions.modules;
+  const exact = path.join(NATIVE_DIR, `better_sqlite3-node-v${abi}.node`);
+
+  if (fs.existsSync(exact)) return exact;
+
+  // .native/ 已存在但没有匹配当前 ABI 的产物：说明这个项目已启用了
+  // 多环境共存机制，此时**不能**退回 node_modules 里的默认二进制
+  // （它多半是别的 Node 版本编译的，加载会直接段错误、无法捕获）。
+  if (fs.existsSync(NATIVE_DIR)) {
+    const have = fs.readdirSync(NATIVE_DIR).filter(f => f.endsWith('.node'));
+    console.error('');
+    console.error('  ✗ 未找到匹配当前 Node 的 better-sqlite3 原生模块');
+    console.error(`    当前 Node ${process.version} (ABI ${abi})`);
+    console.error(`    .native/ 中已有: ${have.length ? have.join(', ') : '(空)'}`);
+    console.error('');
+    console.error('    请在本机执行一次（为该 Node 版本编译）：');
+    console.error('');
+    console.error('        bash native-build.sh');
+    console.error('');
+    process.exit(1);
+  }
+
+  return null; // 未启用多环境机制 → 用 node_modules 默认二进制
+}
+
+/**
+ * 打开数据库连接。
+ *
+ * better-sqlite3 的原生 .node 是在构造 Database 时才真正 dlopen 的，
+ * 因此这里才是加载失败（ERR_DLOPEN_FAILED / ABI 不匹配）会抛出的地方。
+ * 捕获后给出可执行的修复指引，而不是让用户面对一句难懂的堆栈。
+ *
+ * nativeBinding 选项可传入具体的 .node 路径，绕过默认查找逻辑，
+ * 从而让不同 Node 版本各用各的编译产物（见 resolveNativeBinding）。
+ */
+function openDatabase(file) {
+  const binding = resolveNativeBinding();
+  try {
+    const Database = require('better-sqlite3');
+    return binding ? new Database(file, { nativeBinding: binding }) : new Database(file);
+  } catch (e) {
+    console.error('');
+    console.error('  ✗ 无法加载 better-sqlite3 原生模块');
+    console.error(`    当前 Node ${process.version} (ABI ${process.versions.modules})`);
+    console.error(`    原因: ${e.message}`);
+    console.error('');
+    console.error('    该模块与 Node ABI 版本强绑定。若 node_modules 被多个不同');
+    console.error('    Node 版本的环境共用，请在本机执行一次：');
+    console.error('');
+    console.error('        bash native-build.sh');
+    console.error('');
+    process.exit(1);
+  }
+}
+
 let db;
 
 function initDatabase() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-  db = new Database(DB_FILE);
+  db = openDatabase(DB_FILE);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
 
