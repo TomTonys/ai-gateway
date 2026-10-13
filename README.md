@@ -2,17 +2,21 @@
 
 一个开箱即用的 AI API 网关，支持：
 
-- **多供应商管理**：添加任意 OpenAI 兼容 API 供应商（OpenAI / DeepSeek / Ollama / vLLM / 自建等）
-- **多模型管理**：每个供应商下可挂多个模型
+- **多供应商管理**：添加任意 OpenAI 兼容 API 供应商（OpenAI / DeepSeek / 硅基流动 / Ollama / vLLM / 自建等）
+- **多模型管理**：每个供应商下可挂多个模型；模型可选 `chat` 或 `responses` 两种上游请求方式（OpenAI Responses API 自动转换）
+- **多模态输入**：`/v1/chat/completions` 支持 `image_url` 图片输入（OpenAI 兼容消息格式），网关透传给支持视觉的模型
+- **请求体归一化**：自动把 `role: developer` 转换为 `system`、为缺失的 `tool` 结果消息补占位，避免部分严格上游（如 SenseNova）返回 400
 - **模型融合 + 自动故障转移**：把多个供应商模型"融合"成一个对外虚拟模型，请求失败时自动按优先级/顺序切换到下一个成员，全失败才返回错误
 - **Web 控制台**：浏览器里可视化完成上述所有添加/编辑/成员配置操作
 - **OpenAI 兼容接口**：对下游暴露 `/v1/chat/completions` 与 `/v1/models`，客户端只需改 `base_url` 即可接入
-- **请求日志 + 统计**：记录每次调用的命中模型、耗时、成败，仪表盘展示
+- **请求日志 + 统计**：记录每次调用的命中模型、耗时、成败、token（输入/缓存/输出）、请求特征快照（消息数/图片数/异常参数），仪表盘分页展示；支持 Token 消耗统计（按模型/供应商聚合）
+- **模型连通性测试**：控制台一键测试模型可达性，结果入库展示
 
 ## 技术栈
 
 - Node.js + Express
-- 纯 JS JSON 文件持久化（`data/gateway.json`），零原生依赖，任意 Node 版本可直接运行
+- SQLite 持久化（`better-sqlite3`，`data/gateway.db`，WAL 模式）；启动时自动一次性迁移旧版 `data/gateway.json`，旧 JSON 文件不再参与读写
+  - 要求 Node ≥ 18（better-sqlite3 v11）；首次安装若遇到原生模块 ABI 不匹配，执行 `npm rebuild better-sqlite3`
 - 前端：Vue 3 + Element Plus（CDN，无构建步骤）
 
 ## 快速开始
@@ -37,15 +41,17 @@ npm start
 ## 使用流程
 
 1. **添加供应商**：控制台 → 供应商 → 填写名称、Base URL、API Key。
-   - OpenAI：`https://api.openai.com`
-   - DeepSeek：`https://api.deepseek.com`
-   - 本地 Ollama：`http://127.0.0.1:11434`
-2. **添加模型**：控制台 → 模型 → 选择供应商、填供应商侧真实模型名（如 `gpt-4o`、`deepseek-chat`）。
+   - Base URL **只填到版本号为止**，网关会自动拼接 `/chat/completions` 或 `/responses`：
+     - OpenAI：`https://api.openai.com`
+     - DeepSeek：`https://api.deepseek.com`
+     - 硅基流动：`https://api.siliconflow.cn/v1`
+     - 本地 Ollama：`http://127.0.0.1:11434`
+2. **添加模型**：控制台 → 模型 → 选择供应商、填供应商侧真实模型名（如 `gpt-4o`、`deepseek-chat`、`THUDM/GLM-4-9B-0414`），可选请求方式（默认 `chat`；上游为 OpenAI Responses API 的选 `responses`，网关自动完成请求体与 usage 字段转换）。
 3. **创建融合模型**：控制台 → 融合模型 → 起一个对外虚拟名（如 `my-gpt`），选择重试模式：
    - **按优先级**：`priority` 数字越小越先调用
    - **按顺序**：按成员添加先后顺序调用
 4. **配置成员**：给融合模型添加若干模型成员，设置优先级、可单独启用/停用。
-5. **调用**：下游客户端把 base_url 指向本网关，`model` 填融合模型名即可。
+5. **调用**：下游客户端把 base_url 指向本网关，`model` 填融合模型名即可（默认融合模型名为 `auto`）。
 
 ## 故障转移行为
 
@@ -57,9 +63,10 @@ npm start
    - 成功 → 直接透传响应（支持流式/非流式），结束
    - 失败且可重试（5xx / 429 / 网络异常）→ 记录日志，尝试下一个成员
    - 失败且不可重试（400/401/403 等客户端错误）→ 直接返回该错误，不再尝试后续
+      （例外：400 且响应体含 image / unsupported / modality / "inference request is invalid" 等关键词时，视为当前成员不支持该请求形态，自动重试下一个成员）
 4. 全部失败 → 返回 `502`，聚合所有成员的错误详情
 
-成功/失败均写入 `request_logs`，仪表盘与侧边栏统计可见。
+成功/失败均写入请求日志（含 token 用量、请求特征快照），仪表盘与侧边栏统计可见。
 
 ## API 参考（控制台后端）
 
@@ -73,8 +80,11 @@ npm start
 | GET/PUT/DELETE | `/api/custom-models/:id` | 融合模型 查/改/删 |
 | GET/POST | `/api/custom-models/:id/members` | 成员列表 / 添加成员 |
 | PUT/DELETE | `/api/custom-models/:id/members/:memberId` | 改优先级与启用状态 / 移除成员 |
-| GET | `/api/logs?limit=N` | 请求日志 |
-| GET | `/api/stats` | 请求统计 |
+| GET | `/api/logs?limit=N&offset=M&success=1|0` | 请求日志（分页 + 成败过滤） |
+| GET | `/api/logs/stats` | 请求成功/失败统计 |
+| GET | `/api/logs/token-stats?days=N` | Token 消耗统计（按模型/供应商聚合） |
+| GET | `/api/models/test-results` | 模型连通性测试结果 |
+| POST | `/api/models/:id/test` | 单模型连通性测试 |
 
 ## 项目结构
 
@@ -82,7 +92,7 @@ npm start
 ai_gateway/
 ├── server.js                  # 入口：Express + 静态 + 路由挂载
 ├── src/
-│   ├── db.js                  # 持久化层（JSON 文件）+ 各 Repository
+│   ├── db.js                  # 持久化层（SQLite + JSON 自动迁移）+ 各 Repository
 │   ├── gateway.js             # 故障转移核心逻辑
 │   ├── providers/openai.js    # OpenAI 兼容调用适配器
 │   └── routes/
@@ -92,11 +102,14 @@ ai_gateway/
 ├── public/
 │   └── index.html             # Web 控制台（Vue3 + Element Plus）
 └── data/
-    └── gateway.json           # 运行时数据（自动创建）
+    ├── gateway.db             # SQLite 运行时数据库（自动创建）
+    ├── gateway.db-wal/shm     # SQLite WAL 附属文件
+    └── .migrated-sqlite       # 一次性 JSON→SQLite 迁移标记
 ```
 
 ## 说明 / 限制
 
 - 鉴权：网关目前不校验 `Authorization`，生产环境建议在前面套一层鉴权中间件或反代。
-- 数据：JSON 文件适合中小规模配置；若需高并发写入可替换 `src/db.js` 为 SQLite/Postgres（接口已隔离，仅需改这一层）。
+- 数据：SQLite（WAL）单文件存储，崩溃安全；旧版 `data/gateway.json` 会在启动时自动一次性迁移进库，之后不再读写。
+- 原生模块：`better-sqlite3` 需与 Node ABI 匹配，要求 Node ≥ 18；宿主环境若 Node 版本与安装时不同导致加载失败/段错误，执行 `npm rebuild better-sqlite3` 即可。
 - 超时：上游单次请求 120s 超时（`src/providers/openai.js` 可调）。
