@@ -342,12 +342,14 @@
                 <th>模型</th>
                 <th style="width:80px">状态</th>
                 <th style="width:100px">耗时(ms)</th>
+                <th style="width:130px" title="输入 / 缓存 / 输出 token">Token (入/缓存/出)</th>
+                <th style="width:150px" title="消息数 / 图片数 / 额外参数">请求特征</th>
                 <th style="min-width:200px">错误信息</th>
               </tr>
             </thead>
             <tbody>
               <tr v-if="logPages.length === 0 && !logLoading">
-                <td colspan="7" style="text-align:center;color:#c0c4cc;padding:40px">暂无日志</td>
+                <td colspan="9" style="text-align:center;color:#c0c4cc;padding:40px">暂无日志</td>
               </tr>
               <tr v-for="row in logPages" :key="row.id || row.created_at">
                 <td>{{ row.created_at }}</td>
@@ -356,6 +358,36 @@
                 <td>{{ row.target_model }}</td>
                 <td><el-tag :type="row.success ? 'success' : 'danger'" size="small" effect="dark">{{ row.success ? '成功' : '失败' }}</el-tag></td>
                 <td>{{ row.duration_ms }}</td>
+                <td style="white-space:nowrap;font-variant-numeric:tabular-nums">
+                  <template v-if="row.prompt_tokens != null || row.completion_tokens != null">
+                    <span style="color:#409eff">{{ fmtTokens(row.prompt_tokens) }}</span>
+                    <span style="color:#c0c4cc"> / </span>
+                    <span style="color:#67c23a">{{ fmtTokens(row.cached_tokens) }}</span>
+                    <span style="color:#c0c4cc"> / </span>
+                    <span style="color:#e6a23c">{{ fmtTokens(row.completion_tokens) }}</span>
+                  </template>
+                  <template v-else><span style="color:#c0c4cc">—</span></template>
+                </td>
+                <td style="white-space:nowrap" :title="snapshotTitle(row)">
+                  <template v-if="row.request_snapshot">
+                    <span :style="{color: snapAbnormal(row.request_snapshot) ? '#f56c6c' : '#606266'}">
+                      消息{{ row.request_snapshot.msg_count }}
+                    </span>
+                    <template v-if="row.request_snapshot.image_count">
+                      <span style="color:#f56c6c"> 图{{ row.request_snapshot.image_count }}</span>
+                    </template>
+                    <template v-if="row.request_snapshot.empty_content_count">
+                      <span style="color:#f56c6c"> 空{{ row.request_snapshot.empty_content_count }}</span>
+                    </template>
+                    <template v-if="(row.request_snapshot.extra_params||[]).length">
+                      <el-tooltip :content="(row.request_snapshot.extra_params||[]).join(', ')" placement="top">
+                        <span style="color:#e6a23c;cursor:help"> ⚙{{ row.request_snapshot.extra_params.length }}</span>
+                      </el-tooltip>
+                    </template>
+                    <template v-if="row.request_snapshot.stream"><span style="color:#909399"> 流式</span></template>
+                  </template>
+                  <template v-else><span style="color:#c0c4cc">—</span></template>
+                </td>
                 <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="row.error_message">{{ row.error_message || '—' }}</td>
               </tr>
             </tbody>
@@ -644,6 +676,27 @@ const app = createApp({
       return String(n);
     }
 
+    /** 请求快照是否异常（空内容 / 带图 / 额外参数） */
+    function snapAbnormal(s) {
+      if (!s) return false;
+      return (s.empty_content_count > 0) || (s.image_count > 0) || (s.extra_params && s.extra_params.length > 0);
+    }
+
+    /** 请求特征列的悬浮提示 */
+    function snapshotTitle(row) {
+      const s = row.request_snapshot;
+      if (!s) return '';
+      const parts = [
+        `消息: ${s.msg_count} 条`,
+      ];
+      if (s.image_count) parts.push(`图片: ${s.image_count} 张`);
+      if (s.content_array_count) parts.push(`数组型 content: ${s.content_array_count} 条`);
+      if (s.empty_content_count) parts.push(`空内容: ${s.empty_content_count} 条`);
+      if (s.stream) parts.push('流式请求');
+      if (s.extra_params && s.extra_params.length) parts.push(`额外参数: ${s.extra_params.join(', ')}`);
+      return parts.join('\n');
+    }
+
     function tokenModelRows() {
       const rows = Object.entries(tokenStats.by_model || {}).map(([name, v]) => ({ name, ...v }));
       rows.sort((a, b) => (b.total||0) - (a.total||0));
@@ -804,7 +857,7 @@ const app = createApp({
       loadData, loadModels, loadTokenStats, loadTestResults, testModel, testAllModels,
       logPages, logPage, logPageSize, logTotal, logLoading, logFilter, showAllTokens, loadLogs,
       testResults, testingIds, testingAll,
-      tokenStats, fmtTokens, tokenModelRows, tokenProviderRows,
+      tokenStats, fmtTokens, snapAbnormal, snapshotTitle, tokenModelRows, tokenProviderRows,
       providerDialog, openProviderDialog, saveProvider, deleteProvider,
       modelDialog, openModelDialog, saveModel, deleteModel,
       customModelDialog, openCustomModelDialog, saveCustomModel, deleteCustomModel,
