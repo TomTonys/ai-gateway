@@ -67,6 +67,26 @@
     }
     .excel-table tr:hover td { background: #ecf5ff; }
 
+    /* 日志详情弹窗 */
+    .log-detail-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 20px; background: #f8f9fa; border-radius: 8px; padding: 12px 14px; font-size: 13px; }
+    .log-detail-meta .meta-item { display: flex; gap: 8px; }
+    .log-detail-meta .meta-k { color: #909399; flex: 0 0 62px; }
+    .log-detail-meta .meta-v { color: #303133; font-weight: 500; word-break: break-all; }
+    .body-toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+    .body-hint { font-size: 12px; color: #909399; }
+    .body-tabs { display: flex; gap: 4px; border-bottom: 1px solid #dcdfe6; margin: 12px 0 10px; }
+    .body-tab {
+      background: none; border: none; cursor: pointer; padding: 8px 16px; font-size: 13px;
+      color: #606266; border-bottom: 2px solid transparent; margin-bottom: -1px; font-family: inherit;
+    }
+    .body-tab:hover { color: #409eff; }
+    .body-tab.active { color: #409eff; border-bottom-color: #409eff; font-weight: 600; }
+    .body-pre {
+      background: #1e1e1e; color: #d4d4d4; border-radius: 6px; padding: 12px 14px;
+      font-family: 'Fira Code', 'Consolas', monospace; font-size: 12px; line-height: 1.55;
+      max-height: 52vh; overflow: auto; white-space: pre-wrap; word-break: break-all; margin: 0;
+    }
+
     /* 融合模型成员 */
     .member-row { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid #f0f0f0; }
     .member-row:last-child { border-bottom: none; }
@@ -351,7 +371,10 @@
               <tr v-if="logPages.length === 0 && !logLoading">
                 <td colspan="9" style="text-align:center;color:#c0c4cc;padding:40px">暂无日志</td>
               </tr>
-              <tr v-for="row in logPages" :key="row.id || row.created_at">
+              <tr v-for="row in logPages" :key="row.id || row.created_at"
+                  style="cursor:pointer"
+                  title="点击查看该请求的详细情况"
+                  @click="openLogDetail(row)">
                 <td>{{ row.created_at }}</td>
                 <td>{{ row.custom_model }}</td>
                 <td>{{ row.provider_name }}</td>
@@ -382,6 +405,16 @@
                     <template v-if="(row.request_snapshot.extra_params||[]).length">
                       <el-tooltip :content="(row.request_snapshot.extra_params||[]).join(', ')" placement="top">
                         <span style="color:#e6a23c;cursor:help"> ⚙{{ row.request_snapshot.extra_params.length }}</span>
+                      </el-tooltip>
+                    </template>
+                    <template v-if="row.request_snapshot.role_converted">
+                      <el-tooltip content="developer 角色已自动降级为 system" placement="top">
+                        <span style="color:#67c23a"> 角色{{ row.request_snapshot.role_converted }}</span>
+                      </el-tooltip>
+                    </template>
+                    <template v-if="row.request_snapshot.tool_patched">
+                      <el-tooltip content="缺失的 tool 结果消息已自动补齐" placement="top">
+                        <span style="color:#67c23a"> 补tool{{ row.request_snapshot.tool_patched }}</span>
                       </el-tooltip>
                     </template>
                     <template v-if="row.request_snapshot.stream"><span style="color:#909399"> 流式</span></template>
@@ -512,6 +545,64 @@
       <el-button size="small" type="danger" plain @click="removeMember(member)">移除</el-button>
     </div>
     <template #footer><el-button @click="memberDialog.visible=false">关闭</el-button></template>
+  </el-dialog>
+
+  <!-- ===== 日志详情弹窗 ===== -->
+  <el-dialog v-model="logDetailDialog.visible" title="请求详情" width="900px" top="6vh">
+    <div v-if="logDetailDialog.loading" style="text-align:center;padding:40px;color:#909399">加载中…</div>
+    <template v-else-if="logDetailDialog.row">
+      <!-- 概览 -->
+      <div class="log-detail-meta">
+        <div class="meta-item"><span class="meta-k">时间</span><span class="meta-v">{{ logDetailDialog.row.created_at }}</span></div>
+        <div class="meta-item"><span class="meta-k">融合模型</span><span class="meta-v">{{ logDetailDialog.row.custom_model }}</span></div>
+        <div class="meta-item"><span class="meta-k">命中</span><span class="meta-v">{{ logDetailDialog.row.provider_name }} / {{ logDetailDialog.row.target_model }}</span></div>
+        <div class="meta-item"><span class="meta-k">状态</span>
+          <el-tag :type="logDetailDialog.row.success ? 'success' : 'danger'" size="small" effect="dark">
+            {{ logDetailDialog.row.success ? '成功' : '失败' }} {{ logDetailDialog.row.status_code }}
+          </el-tag>
+        </div>
+        <div class="meta-item"><span class="meta-k">耗时</span><span class="meta-v">{{ logDetailDialog.row.duration_ms }} ms</span></div>
+        <div class="meta-item"><span class="meta-k">Token</span><span class="meta-v">
+          入 {{ fmtTokens(logDetailDialog.row.prompt_tokens) }} ·
+          缓存 {{ fmtTokens(logDetailDialog.row.cached_tokens) }} ·
+          出 {{ fmtTokens(logDetailDialog.row.completion_tokens) }} ·
+          总 {{ fmtTokens(logDetailDialog.row.total_tokens) }}
+        </span></div>
+        <div class="meta-item" v-if="logDetailDialog.row.request_snapshot">
+          <span class="meta-k">请求特征</span>
+          <span class="meta-v">{{ snapshotTitle(logDetailDialog.row).replace(/\n/g, ' · ') }}</span>
+        </div>
+      </div>
+
+      <el-alert v-if="logDetailDialog.row.error_message" type="error" :closable="false" style="margin:12px 0"
+                :title="logDetailDialog.row.error_message"></el-alert>
+
+      <div class="body-tabs">
+        <button class="body-tab" :class="{active: logDetailDialog.tab==='request'}"
+                @click="logDetailDialog.tab='request'">接口请求（发给上游）</button>
+        <button class="body-tab" :class="{active: logDetailDialog.tab==='response'}"
+                @click="logDetailDialog.tab='response'">输出详情（上游返回）</button>
+      </div>
+
+      <div v-show="logDetailDialog.tab==='request'">
+        <div class="body-toolbar">
+          <span class="body-hint">这是网关实际发送给 <b>{{ logDetailDialog.row.provider_name }}/{{ logDetailDialog.row.target_model }}</b> 的请求体</span>
+          <el-button size="small" @click="copyLogBody('request')">复制</el-button>
+        </div>
+        <pre class="body-pre">{{ logDetailDialog.row.request_body || '（无记录）' }}</pre>
+      </div>
+
+      <div v-show="logDetailDialog.tab==='response'">
+        <div class="body-toolbar">
+          <span class="body-hint">
+            {{ logDetailDialog.row.request_snapshot && logDetailDialog.row.request_snapshot.stream ? '流式 SSE 原文（累积）' : '上游返回的响应体' }}
+          </span>
+          <el-button size="small" @click="copyLogBody('response')">复制</el-button>
+        </div>
+        <pre class="body-pre">{{ logDetailDialog.row.response_body || '（无记录）' }}</pre>
+      </div>
+    </template>
+    <template #footer><el-button @click="logDetailDialog.visible=false">关闭</el-button></template>
   </el-dialog>
 </div>
 
@@ -682,6 +773,35 @@ const app = createApp({
       return (s.empty_content_count > 0) || (s.image_count > 0) || (s.extra_params && s.extra_params.length > 0);
     }
 
+    // ---- 日志详情弹窗 ----
+    const logDetailDialog = reactive({ visible: false, loading: false, row: null, tab: 'request' });
+    async function openLogDetail(row) {
+      logDetailDialog.visible = true;
+      logDetailDialog.loading = true;
+      logDetailDialog.row = null;
+      logDetailDialog.tab = 'request';
+      try {
+        const res = await fetch(`/api/logs/${row.id}`);
+        const json = await res.json();
+        logDetailDialog.row = json.data || null;
+      } catch (e) {
+        logDetailDialog.row = null;
+      } finally {
+        logDetailDialog.loading = false;
+      }
+    }
+    async function copyLogBody(which) {
+      const row = logDetailDialog.row;
+      if (!row) return;
+      const text = which === 'request' ? (row.request_body || '') : (row.response_body || '');
+      try {
+        await navigator.clipboard.writeText(text);
+        ElementPlus.ElMessage.success('已复制到剪贴板');
+      } catch {
+        ElementPlus.ElMessage.warning('复制失败，请手动选择文本');
+      }
+    }
+
     /** 请求特征列的悬浮提示 */
     function snapshotTitle(row) {
       const s = row.request_snapshot;
@@ -694,6 +814,8 @@ const app = createApp({
       if (s.empty_content_count) parts.push(`空内容: ${s.empty_content_count} 条`);
       if (s.stream) parts.push('流式请求');
       if (s.extra_params && s.extra_params.length) parts.push(`额外参数: ${s.extra_params.join(', ')}`);
+      if (s.role_converted) parts.push(`自动转换 ${s.role_converted} 条 developer 角色为 system`);
+      if (s.tool_patched) parts.push(`自动补齐 ${s.tool_patched} 条缺失的 tool 结果消息`);
       return parts.join('\n');
     }
 
@@ -862,6 +984,7 @@ const app = createApp({
       modelDialog, openModelDialog, saveModel, deleteModel,
       customModelDialog, openCustomModelDialog, saveCustomModel, deleteCustomModel,
       memberDialog, availableModelsForAdd, openMemberDialog, addMember, updateMember, removeMember,
+      logDetailDialog, openLogDetail, copyLogBody,
     };
   }
 });
