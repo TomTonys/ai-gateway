@@ -356,7 +356,7 @@ const CustomModelRepo = {
 //  Request Logs
 // ============================================================
 const LogRepo = {
-  create({ custom_model, target_model, provider_name, status_code, success, duration_ms, error_message, usage }) {
+  create({ custom_model, target_model, provider_name, status_code, success, duration_ms, error_message, usage, request_snapshot }) {
     store.logs.unshift({
       id: nextId('log'),
       custom_model: custom_model || '',
@@ -370,6 +370,7 @@ const LogRepo = {
       completion_tokens: usage ? (usage.completion_tokens || 0) : 0,
       total_tokens: usage ? (usage.total_tokens || 0) : 0,
       cached_tokens: usage ? (usage.cached_tokens || 0) : 0,
+      request_snapshot: request_snapshot || null,
       created_at: now(),
     });
     if (store.logs.length > LOG_CAP) store.logs.length = LOG_CAP;
