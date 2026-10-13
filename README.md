@@ -16,7 +16,11 @@
 
 - Node.js + Express
 - SQLite 持久化（`better-sqlite3`，`data/gateway.db`，WAL 模式）；启动时自动一次性迁移旧版 `data/gateway.json`，旧 JSON 文件不再参与读写
-  - 要求 Node ≥ 18（better-sqlite3 v11）；首次安装若遇到原生模块 ABI 不匹配，执行 `npm rebuild better-sqlite3`
+  - 要求 Node ≥ 18（better-sqlite3 v11）
+  - 原生模块按 Node ABI 分别编译：`npm install` 会自动执行 `native-build.sh`，
+    产物存于 `.native/better_sqlite3-node-v<abi>.node`。这样同一份代码在多个
+    不同 Node 版本的环境（如宿主机 Node 18 + 容器 Node 24）中共用时，
+    各自加载自己的二进制、互不覆盖；手动重建用 `npm run native`
 - 前端：Vue 3 + Element Plus（CDN，无构建步骤）
 
 ## 快速开始
@@ -91,6 +95,7 @@ npm start
 ```
 ai_gateway/
 ├── server.js                  # 入口：Express + 静态 + 路由挂载
+├── native-build.sh            # 为本机 Node 编译 better-sqlite3（按 ABI 存放）
 ├── src/
 │   ├── db.js                  # 持久化层（SQLite + JSON 自动迁移）+ 各 Repository
 │   ├── gateway.js             # 故障转移核心逻辑
@@ -111,5 +116,5 @@ ai_gateway/
 
 - 鉴权：网关目前不校验 `Authorization`，生产环境建议在前面套一层鉴权中间件或反代。
 - 数据：SQLite（WAL）单文件存储，崩溃安全；旧版 `data/gateway.json` 会在启动时自动一次性迁移进库，之后不再读写。
-- 原生模块：`better-sqlite3` 需与 Node ABI 匹配，要求 Node ≥ 18；宿主环境若 Node 版本与安装时不同导致加载失败/段错误，执行 `npm rebuild better-sqlite3` 即可。
+- 原生模块：`better-sqlite3` 需与 Node ABI 匹配（要求 Node ≥ 18）。本项目用 `.native/` 按 ABI 存放各自编译的二进制，多个 Node 版本的环境可共存；若某环境启动时提示缺少对应 ABI，在该环境执行 `npm run native` 即可。
 - 超时：上游单次请求 120s 超时（`src/providers/openai.js` 可调）。
