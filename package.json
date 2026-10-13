@@ -5,7 +5,9 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "native": "bash native-build.sh",
+    "postinstall": "bash native-build.sh || true"
   },
   "dependencies": {
     "better-sqlite3": "^11.10.0",
