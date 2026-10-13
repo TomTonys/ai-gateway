@@ -39,6 +39,13 @@ router.get('/api/logs', (req, res) => {
   res.json({ data: LogRepo.list(limit, offset, success), total: LogRepo.count(success) });
 });
 
+// 单条日志完整详情（含实际发送的请求体与上游响应体原文，供详情弹窗）
+router.get('/api/logs/:id', (req, res) => {
+  const row = LogRepo.get(req.params.id);
+  if (!row) return res.status(404).json({ error: { message: 'Log not found' } });
+  res.json({ data: row });
+});
+
 router.get('/api/stats', (req, res) => {
   res.json({ data: LogRepo.stats() });
 });
